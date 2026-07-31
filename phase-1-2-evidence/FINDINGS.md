@@ -1,9 +1,11 @@
 # Phase 1–2 evidence — `@evansdai/trellis-pi-ext` fork
 
 **Evidence date:** `[AS OF: 2026-08-01]` (session clock); Pi 0.83.0 / Trellis 0.6.11.
-**Fork commit:** `36524bb` (the code+gate HEAD the composed gates proved;
-final docs HEAD `ac7d871` adds this resolution table; history:
-`da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` → `36524bb` → `ac7d871`; the
+**Fork commit:** `179dfb3` (follow-up-2 code+gate HEAD: NEW-001..004
+resolutions; the TPE-001..012 era gated code HEAD was `36524bb`, final docs
+HEAD `ac7d871`; history: `da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` →
+`36524bb` → `ac7d871` → `b5b5f7e` → `179dfb3`; the docs commit carrying
+this table is the repository HEAD at the time of reading (`git log`); the
 working-copy history was recreated cleanly after an index accident — see note
 below).
 **Logs:** `phase-1-2-evidence/logs/` (gitignored; retained on this machine).
