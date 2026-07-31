@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import {
   fleetRunsRoot,
   newRun,
+  processStarttime,
   reconcileFleetRuns,
   resolveSessionFile,
   writeTrellisFleetRecord,
@@ -171,7 +172,7 @@ test("reconcile cancels a stale run whose owner process is dead (TPE-005)", asyn
   // Overwrite the live-pid marker with a guaranteed-dead owner pid.
   writeFileSync(
     join(runsDir, "trellis", `${staleId}.pid`),
-    JSON.stringify({ pid: await deadPid(), ts: Date.now() - 120_000 }),
+    JSON.stringify({ pid: await deadPid(), starttime: 123 }),
   );
 
   reconcileFleetRuns();
@@ -184,6 +185,35 @@ test("reconcile cancels a stale run whose owner process is dead (TPE-005)", asyn
   assert.equal(record.sessionFile, transcript);
   assert.deepEqual(validateFleetRunRecordV1(record), []);
   assert.equal(existsSync(join(runsDir, "trellis", `${staleId}.pid`)), false);
+});
+
+test("reconcile cancels a stale run whose owner pid was reused by an unrelated process (NEW-003)", async (t) => {
+  if (processStarttime(process.pid) == null) {
+    t.skip("process-birth identity unsupported on this platform (no /proc)");
+    return;
+  }
+  const reusedId = "trellis-check-1-reused000000";
+  plantTranscript(reusedId);
+  const stale = runningState();
+  stale.id = reusedId;
+  stale.startedAt = Date.now() - 120_000; // older than the age gate
+  writeTrellisFleetRecord(stale, reusedId);
+  // The pid is ALIVE (this process) but the marker's birth identity differs:
+  // the recorded owner died and an unrelated process now holds the pid.
+  writeFileSync(
+    join(runsDir, "trellis", `${reusedId}.pid`),
+    JSON.stringify({ pid: process.pid, starttime: 1 }),
+  );
+
+  reconcileFleetRuns();
+
+  const record = JSON.parse(
+    readFileSync(join(runsDir, "trellis", `${reusedId}.json`), "utf-8"),
+  );
+  assert.equal(record.status, "cancelled", "a reused pid must not keep the record running");
+  assert.match(record.error, /reconciled at startup; owner pid reused by a different process/);
+  assert.deepEqual(validateFleetRunRecordV1(record), []);
+  assert.equal(existsSync(join(runsDir, "trellis", `${reusedId}.pid`)), false);
 });
 
 test("reconcile leaves a stale run with a live owner pid running (two-process regression, TPE-005)", async () => {

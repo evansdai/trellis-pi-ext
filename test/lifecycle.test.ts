@@ -47,7 +47,9 @@ type RecordingPi = {
   create: () => unknown;
 };
 
-function recordingPi(): RecordingPi {
+function recordingPi(
+  extension: (pi: never) => unknown = trellisExtension,
+): RecordingPi {
   const listeners = new Map<string, Set<(data: unknown) => void>>();
   const bus: Bus = {
     on: (ch, h) => {
@@ -76,7 +78,7 @@ function recordingPi(): RecordingPi {
       events[event] = handler;
     },
   };
-  trellisExtension(pi as never);
+  extension(pi as never);
   return { bus, events, create: () => pi };
 }
 
@@ -172,8 +174,14 @@ test("child ids are shared across fresh module instances via Symbol.for", async 
     interopDefault: true,
     tryNative: false,
   });
-  const freshMod = await jiti.import(copyPath);
-  const pi2 = recordingPi();
+  const freshMod = (await jiti.import(copyPath)) as {
+    default: (pi: never) => unknown;
+  };
+  // NEW-002: register the FRESH module instance (not the statically imported
+  // original) so the suppression is proven through an actually reloaded module
+  // whose module-local state is empty — only the Symbol.for process-realm set
+  // can carry the announced child id across the reload.
+  const pi2 = recordingPi(freshMod.default);
   // pi2's own bus never announced the child; the suppression must come from
   // the process-realm shared set.
   const out = (pi2.events["before_agent_start"] as (

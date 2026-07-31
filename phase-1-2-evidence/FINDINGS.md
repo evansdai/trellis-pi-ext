@@ -87,8 +87,9 @@ Also note: the retired frankenstein `reconcileFleetRuns` reconciled **all**
 sources unconditionally at startup; the fork scopes reconciliation to the
 `trellis` source dir and, since the oracle follow-up, only flags `running`
 records older than 60 s **when the owner is provably dead** (transcript
-missing or owner-pid marker dead) — a concurrently live run (second pi
-instance) is never clobbered (TPE-005).
+missing, owner-pid marker dead, or the pid reused by a different process per
+its birth identity) — a concurrently live run (second pi instance) is never
+clobbered (TPE-005, NEW-003).
 
 ## Gate results (composed-candidate.sh, disposable profiles, offline)
 
@@ -102,7 +103,7 @@ instance) is never clobbered (TPE-005).
 | E trellis update | PASS | user-modified `.pi/settings.json` classified "Modified by you", preserved byte-identical; update ran to completion with exit 0 (`--skip-all` fallback; see TPE-009 note — the sandbox denies PTY allocation, so the interactive PTY driver could not run here) |
 | F removal | PASS | uninstalling the fork leaves fleet-core installed + headless start clean |
 
-Unit suite: 50/50 (`npm run check`: typecheck + tests; 25/25 pre-follow-up).
+Unit suite: 53/53 (`npm run check`: typecheck + tests; 25/25 pre-follow-up).
 Every new regression fails on the pre-fix code path where feasible (verified
 by running the new suites against `bdf4628:index.ts`: TPE-001 write-path,
 TPE-003 stopReason, TPE-004 no-fabrication, and TPE-005 reconcile regressions
@@ -120,7 +121,7 @@ Resolution table (finding → fix → verification):
 | TPE-002 | project agents not trust-gated | `PiExtensionContext.isProjectTrusted`; project tier only when trusted; untrusted falls back to global tier | trusted/untrusted resolution tests; `buildPrompt` trust flag; Gate B trust assertions |
 | TPE-003 | JSON-mode failures misreported as success | `applyEvent` maps `stopReason` error→failed / aborted→cancelled; `agent_end` cannot overwrite terminal state; exit-0 close derives `failed` from final state | exit-0 `stopReason=error/aborted` tests; terminal records validated against the fleet-core v1 validator |
 | TPE-004 | fabricated sessionFile | `resolveSessionFile` returns null unless a real transcript exists; start record delayed until discovery succeeds; terminal/reconcile re-resolve; unopenable records dropped | null-fallback test; skip-write test; missing-transcript drop test; Gate D real `sessionFile` |
-| TPE-005 | reconcile cancels other processes' live runs | owner marker `<fleetId>.pid` (pid + 30s heartbeat); reconcile only cancels when the transcript is missing or the owner pid is dead; uncertain stays `running` | two-process regression (live pid survives 120s-old record); no-marker stays running; dead-pid cancels; Gate A/D stale markers now carry a real transcript + dead pid |
+| TPE-005 | reconcile cancels other processes' live runs | owner marker `<fleetId>.pid` (pid + process-birth identity); reconcile only cancels when the transcript is missing, the owner pid is dead, or the pid was reused by a different process (identity mismatch); uncertain stays `running` | two-process regression (live pid survives 120s-old record); no-marker stays running; dead-pid cancels; pid-reuse cancels (NEW-003); Gate A/D stale markers now carry a real transcript + dead pid |
 | TPE-006 | frontmatter YAML values ignored | `cleanYamlScalar` (quote-aware `#` comments + unquoting) applied to all fields; case-insensitive booleans; documented scalar subset | inline-comment, `TRUE`/`FALSE`, quoted `"7"`→7, flow/block list comment regressions; README documents the subset (no YAML-parity claim) |
 | TPE-007 | primary-prompt lifecycle tests missing | `test/lifecycle.test.ts`: inject, suppress, other-primary, dispose→re-inject, receiver-binding (class method reading `this`), fresh jiti module instance via `Symbol.for` | 6 lifecycle tests pass; fresh instance loaded from a temp copy of `index.ts` via jiti |
 | TPE-008 | owner-specific test paths | `test/fleet-validator.mjs` resolves `FLEET_CORE_DIR` or the vendored SHA-pinned fixture `test/fixtures/fleet-record-v1.mjs` (fleet-core `2698d3a`); drift-guard test when `FLEET_CORE_DIR` is set; Gate D validator via `$FLEET_DIR/fleet-record-v1.mjs`; gate preflights all prerequisites | `npm run check` passes from the clean tree with no env vars; 13/13 with `FLEET_CORE_DIR` set |
@@ -128,6 +129,10 @@ Resolution table (finding → fix → verification):
 | TPE-010 | AGPL §5(a) notice lacked a date | LICENSE + README: "Modified from the Trellis 0.6.11 Pi extension template by Evans Dai on 2026-08-01" | committed text |
 | TPE-011 | FINDINGS provenance stale | this table + HEAD `36524bb` + full history | — |
 | TPE-012 | max_turns regression too loose | exact `=== N+2` assertion (slow turn cadence + SIGTERM-handled fake child); AbortSignal cancellation case; delayed stdin-error case | 3 tests pass; fail-before verified for the stopReason pair |
+| NEW-001 | auto-retry leaves a stale error → invalid v1 record | final assistant outcome is authoritative: a successful `message_end` clears `errorMessage` and recovers `failed`/`cancelled` → `running`; `agent_start`/`turn_start` only promote `pending` → `running` and never erase a terminal failure; the max_turns diagnostic is re-asserted in the close handler if a late success cleared it | retry-stream probe via `FAKE_PI_RETRY=recover/fail` in `test/retry-recovery.test.ts` (2 tests): recover → `failed:false`/`succeeded`/`error:null` + v1-valid record; fail → stays `failed`; both fail on the pre-fix path (stale `errorMessage='first attempt failed'`, `failed:false` on the fail probe) |
+| NEW-002 | "fresh module instance" lifecycle test didn't test a fresh module | `recordingPi(extension = trellisExtension)` parameterized; the fresh test registers `freshMod.default` (actual jiti reload), not the static import | fresh-instance suppression + primary-injectable assertions pass through the reloaded module |
+| NEW-003 | heartbeat is not a lease (ts never evaluated; PID-reuse keeps orphaned records running forever) | marker now carries `{pid, starttime}` (Linux `/proc/<pid>/stat` field 22 birth identity); reconcile cancels when the pid is alive but its identity differs ("owner pid reused by a different process"); no `/proc` → pid-liveness-only fallback with the leakage documented as a known limitation; `ts`/"30s heartbeat" claims removed from code/README/FINDINGS | `processStarttime` exported; new pid-reuse regression cancels a live-pid/different-identity marker and passes the v1 validator (skips on non-Linux); dead-pid + live-pid tests unchanged |
+| NEW-004 | PTY evidence logging defect in Gate E | the PTY driver streams captured child output into the active update log (`E1-trellis-update.log`, same file the fallback writes) and appends `prompts_answered=N`; stale `E1-*` logs are cleared before the gate; metrics derive from the mode-appropriate log (`prompts_answered=na (skip-all…)` in fallback mode) | `bash -n` clean; gate re-run records `gate_e_mode` + metrics from the mode's own log |
 
 **Gate E evidence note (TPE-009):** the interactive PTY path is implemented in
 `test/composed-candidate.sh` but this sandbox cannot allocate PTYs

@@ -125,8 +125,8 @@ const FLEET_RUN_DIR = "trellis";
 const AGENT_NAME_RE = /^trellis-[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** Fleet ids are derived from sanitized run state; must stay basename-safe. */
 const FLEET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-/** Throttle for the fleet owner-marker heartbeat (see refreshFleetHeartbeat). */
-const FLEET_HEARTBEAT_MS = 30_000;
+/** Throttle for the fleet owner-marker refresh (see refreshFleetOwnerMarker). */
+const FLEET_MARKER_REFRESH_MS = 30_000;
 /** Best-effort steering write at the turn limit (see runPi). */
 const TURN_LIMIT_STEERING =
   "wrap up now — provide your final answer for the delegated task and stop.";
@@ -876,8 +876,9 @@ function fleetRecordFor(state: RunState, fleetId: string): FleetRunRecord {
  * Write the run record atomically (tmp + rename); best-effort, never breaks a
  * run. Skips silently when the fleet id is unsafe or no real transcript exists
  * yet (never fabricates a sessionFile). Running records carry a sidecar owner
- * marker (`<fleetId>.pid`, pid + heartbeat) so reconcile can distinguish a
- * dead owner from another process's live run; terminal writes remove it.
+ * marker (`<fleetId>.pid`, pid + process-birth identity) so reconcile can
+ * distinguish a dead owner from another process's live run — including a pid
+ * that was reused by an unrelated process (NEW-003); terminal writes remove it.
  */
 export function writeTrellisFleetRecord(state: RunState, fleetId: string): void {
   try {
@@ -910,7 +911,10 @@ function writeFleetOwnerMarker(fleetId: string): void {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(
       join(dir, `${fleetId}.pid`),
-      JSON.stringify({ pid: process.pid, ts: Date.now() }),
+      JSON.stringify({
+        pid: process.pid,
+        starttime: processStarttime(process.pid),
+      }),
       { encoding: "utf8", mode: 0o600 },
     );
   } catch {
@@ -929,13 +933,35 @@ function removeFleetOwnerMarker(fleetId: string): void {
 function readFleetOwnerMarker(
   dir: string,
   fleetId: string,
-): { pid: number; ts: number } | null {
+): { pid: number; starttime: number | null } | null {
   if (!FLEET_ID_RE.test(fleetId)) return null;
   try {
     const raw = JSON.parse(readText(join(dir, `${fleetId}.pid`))) as JsonObject;
     const pid = typeof raw.pid === "number" ? raw.pid : NaN;
     if (!Number.isInteger(pid) || pid <= 0) return null;
-    return { pid, ts: typeof raw.ts === "number" ? raw.ts : 0 };
+    const starttime =
+      typeof raw.starttime === "number" ? raw.starttime : null;
+    return { pid, starttime };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Process-birth identity: Linux /proc/<pid>/stat field 22 (starttime, clock
+ * ticks since boot). Returns null where unsupported (non-Linux, no /proc
+ * permission) — callers then fall back to pid-liveness only, with PID-reuse
+ * leakage documented as a known limitation.
+ */
+export function processStarttime(pid: number): number | null {
+  try {
+    // Field 2 (comm) may contain spaces/parens, so split after the last ')'
+    // (field 3 = state); starttime is the 22nd field -> index 22 - 3 = 19.
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const v = Number(stat.slice(close + 1).trim().split(/\s+/)[19]);
+    return Number.isFinite(v) && v >= 0 ? v : null;
   } catch {
     return null;
   }
@@ -951,15 +977,17 @@ function pidAlive(pid: number): boolean {
 }
 
 /**
- * Throttled heartbeat for the current run's owner marker. Called from the
+ * Throttled refresh of the current run's owner marker. Called from the
  * JSON-mode event loop; the marker proves the owner process is alive even for
- * runs started by an earlier pi process.
+ * runs started by an earlier pi process. The marker carries a static
+ * process-birth identity, not a lease — the refresh only restores a marker
+ * deleted mid-run.
  */
-let lastFleetHeartbeat = 0;
-function refreshFleetHeartbeat(fleetId: string): void {
+let lastFleetMarkerRefresh = 0;
+function refreshFleetOwnerMarker(fleetId: string): void {
   const now = Date.now();
-  if (now - lastFleetHeartbeat < FLEET_HEARTBEAT_MS) return;
-  lastFleetHeartbeat = now;
+  if (now - lastFleetMarkerRefresh < FLEET_MARKER_REFRESH_MS) return;
+  lastFleetMarkerRefresh = now;
   writeFleetOwnerMarker(fleetId);
 }
 
@@ -967,8 +995,10 @@ function refreshFleetHeartbeat(fleetId: string): void {
  * Reconcile orphaned trellis "running" records at extension startup. A record
  * is only touched when it is at least RECONCILE_MIN_AGE_MS old, and only when
  * the owner can be proven dead: the session transcript is missing (a live run
- * always has one) or the owner marker's pid is no longer alive. Anything
- * uncertain is left as `running` — never cancel another process's live run.
+ * always has one), the owner marker's pid is no longer alive, or the pid is
+ * alive but its process-birth identity differs from the marker's (the pid was
+ * reused by an unrelated process — NEW-003). Anything uncertain is left as
+ * `running` — never cancel another process's live run.
  */
 export function reconcileFleetRuns(): void {
   const dir = trellisFleetDir();
@@ -1028,8 +1058,17 @@ export function reconcileFleetRuns(): void {
       const owner = readFleetOwnerMarker(dir, id);
       if (owner && !pidAlive(owner.pid)) {
         reason = "owner process exited";
+      } else if (owner && owner.starttime != null) {
+        const current = processStarttime(owner.pid);
+        if (current != null && current !== owner.starttime) {
+          // The pid is alive but is a DIFFERENT process than the owner: the old
+          // owner is dead and its pid was reused. Without this identity check a
+          // reused pid would keep the orphaned record "running" forever.
+          reason = "owner pid reused by a different process";
+        }
       }
-      // No marker, or a live owner pid: uncertain -> leave as running.
+      // No marker, or a live owner with a matching birth identity (or an
+      // unsupported /proc): uncertain -> leave as running.
     }
     if (!reason) continue;
     const cancelled: FleetRunRecord = {
@@ -1723,7 +1762,11 @@ function applyEvent(r: RunState, evt: JsonObject): boolean {
   const type = typeof evt.type === "string" ? evt.type : "";
   if (!type) return false;
   if (type === "agent_start" || type === "turn_start") {
-    r.status = "running";
+    // Start events alone must not erase a terminal failure: after a failed/
+    // aborted assistant message the state is terminal, and a Pi auto-retry
+    // only recovers once a successful assistant message proves it (NEW-001).
+    // "pending" is the initial state and promotes to running on the first start.
+    if (r.status === "pending") r.status = "running";
     r.startedAt ??= Date.now();
     return true;
   }
@@ -1783,6 +1826,16 @@ function applyEvent(r: RunState, evt: JsonObject): boolean {
         typeof msg.errorMessage === "string" && msg.errorMessage.trim()
           ? msg.errorMessage
           : "assistant stopReason=aborted";
+    } else {
+      // The final assistant outcome is authoritative (NEW-001): a successful
+      // message must never leave a stale diagnostic behind. Pi auto-retries a
+      // failed attempt with a fresh agent_start; without this recovery the
+      // stale errorMessage would survive into a "succeeded" record — a v1
+      // violation (succeeded records require error=null). Recovery is only
+      // granted by a successful message, never by start events alone.
+      r.errorMessage = undefined;
+      if (r.status === "failed" || r.status === "cancelled")
+        r.status = "running";
     }
     return true;
   }
@@ -1946,7 +1999,7 @@ export function runPi(
       const evt = parseJsonEvent(line);
       if (!evt || !applyEvent(state, evt)) return;
       writeStartRecord();
-      refreshFleetHeartbeat(fleetId);
+      refreshFleetOwnerMarker(fleetId);
       emit();
       if (maxTurns && maxTurns > 0) {
         const turns = state.usage.turns;
@@ -1997,6 +2050,17 @@ export function runPi(
       state.finishedAt = Date.now();
       if (aborted) {
         state.status = "cancelled";
+        // A successful message_end processed after the abort branch could have
+        // cleared the max_turns diagnostic (NEW-001 makes success authoritative);
+        // restore it deterministically so the record keeps the real reason.
+        if (
+          !state.errorMessage &&
+          maxTurns &&
+          maxTurns > 0 &&
+          state.usage.turns >= maxTurns + GRACE_TURNS
+        ) {
+          state.errorMessage = `max_turns exceeded (${maxTurns} + ${GRACE_TURNS} grace)`;
+        }
         state.errorMessage = state.errorMessage ?? "cancelled";
         done({ output: finalize(state, "cancelled"), failed: true });
         return;

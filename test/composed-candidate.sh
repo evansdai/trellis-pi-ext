@@ -108,7 +108,7 @@ plant_stale() { # $1 = runs dir
   local dead_pid
   dead_pid="$(node -e 'const {spawn}=require("node:child_process");const c=spawn(process.execPath,["-e","process.exit(0)"]);c.on("exit",()=>console.log(c.pid))')"
   : > "$dir/2026-08-01T00-00-00-000Z_stale-proof.jsonl"
-  printf '{"pid":%s,"ts":%s}\n' "$dead_pid" "$ts" > "$dir/stale-proof.pid"
+  printf '{"pid":%s,"starttime":123}\n' "$dead_pid" > "$dir/stale-proof.pid"
   cat > "$dir/stale-proof.json" <<JSON
 {"version":1,"source":"trellis","id":"stale-proof","agent":"trellis-implement","status":"running","startedAt":$ts,"finishedAt":null,"prompt":"stale","sessionFile":"$dir/2026-08-01T00-00-00-000Z_stale-proof.jsonl","error":null}
 JSON
@@ -280,8 +280,11 @@ BEFORE="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
 # about preservation. Sandboxes without PTY devices fall back to trellis's
 # official non-interactive batch flag `--skip-all` (same decisions: proceed=yes,
 # every conflict=skip); the evidence records which mode actually ran.
+# NEW-004: clear stale gate-E logs first — a previous run's fallback log must
+# not leak metrics into a PTY-mode run (and vice versa).
+rm -f "$EVIDENCE_DIR/E1-pty-attempt.log" "$EVIDENCE_DIR/E1-trellis-update.log"
 GATE_E_MODE="pty"
-python3 - "$MIMIC" "$TRELLIS_CLI" <<'PY' > "$EVIDENCE_DIR/E1-pty-attempt.log" 2>&1
+python3 - "$MIMIC" "$TRELLIS_CLI" "$EVIDENCE_DIR/E1-trellis-update.log" <<'PY' > "$EVIDENCE_DIR/E1-pty-attempt.log" 2>&1
 import os
 import pty
 import re
@@ -289,22 +292,30 @@ import select
 import sys
 import time
 
-mimic, cli = sys.argv[1:3]
+mimic, cli, log_path = sys.argv[1:4]
 cmd = ["bash", "-c", f"cd {mimic} && exec '{cli}' update"]
 
+logf = None
 try:
     pid, fd = pty.fork()
 except OSError as e:
     print(f"PTY_UNAVAILABLE: {e}")
     sys.exit(4)
+
+# NEW-004: the child's captured PTY output is the active update log (the same
+# file the fallback mode writes and the post-gate metrics grep), so a PTY-mode
+# run produces the same evidence shape as a --skip-all run.
+logf = open(log_path, "wb")
 if pid == 0:
     os.execvp(cmd[0], cmd[1:])
 
 output = b""
 answers = 0
 
+
 def send(s):
     os.write(fd, s.encode())
+
 
 status = None
 deadline = time.time() + 180
@@ -318,6 +329,8 @@ while time.time() < deadline:
         if not chunk:
             break
         output += chunk
+        logf.write(chunk)
+        logf.flush()
         text = output.decode(errors="replace")
         if answers == 0 and re.search(r"Proceed\?", text):
             send("y\n")
@@ -334,8 +347,12 @@ if status is None:
     os.kill(pid, 9)
     os.waitpid(pid, 0)
     print(f"PTY driver timed out; prompts answered: {answers}")
+    logf.write(f"PTY_DRIVER_TIMEOUT answers={answers}\n".encode())
+    logf.close()
     sys.exit(3)
 print(f"prompts_answered={answers}")
+logf.write(f"prompts_answered={answers}\n".encode())
+logf.close()
 sys.exit(status)
 PY
 PTY_RC=$?
@@ -356,7 +373,15 @@ grep -Fq '"extensions": []' "$MIMIC/.pi/settings.json" || fail "settings.json co
   printf 'settings_json_preserved=yes\n'
   printf 'update_exit_code=%s\n' "$PTY_RC"
   printf 'gate_e_mode=%s\n' "$GATE_E_MODE"
-  printf 'prompts_answered=%s\n' "$(grep -c "prompts_answered=2" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
+  # NEW-004: metrics derive from the log the selected mode actually wrote —
+  # in pty mode the driver appends the child transcript + prompts_answered
+  # line to the same E1-trellis-update.log the fallback writes.
+  if [ "$GATE_E_MODE" = "pty" ]; then
+    PA="$(grep -c "prompts_answered=2" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
+  else
+    PA="na (skip-all batch flag; no interactive prompts)"
+  fi
+  printf 'prompts_answered=%s\n' "$PA"
   printf 'update_output_mentions_modified=%s\n' "$(grep -c "Modified by you" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
   printf 'update_output_mentions_skip=%s\n' "$(grep -c "Skip" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
 } > "$EVIDENCE_DIR/E2-findings.txt"

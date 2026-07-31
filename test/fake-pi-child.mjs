@@ -96,6 +96,35 @@ if (writeSession && sessionDir && sessionId) {
 }
 
 out({ type: "agent_start" });
+
+// NEW-001: Pi auto-retry replay. FAKE_PI_RETRY=recover -> error, agent_end,
+// fresh agent_start, successful message, agent_end, exit 0. =fail -> the
+// retry produces no message at all, so the terminal failure must survive.
+const retry = process.env.FAKE_PI_RETRY;
+if (retry === "recover" || retry === "fail") {
+  const failedEnd = () => {
+    const m = messageEnd(1);
+    m.stopReason = "error";
+    m.errorMessage = "first attempt failed";
+    return m;
+  };
+  out({ type: "agent_start" });
+  out({ type: "turn_start", turnIndex: 0 });
+  await new Promise((r) => setTimeout(r, turnDelay));
+  out({ type: "message_end", message: failedEnd() });
+  await new Promise((r) => setTimeout(r, turnDelay));
+  out({ type: "agent_end", messages: [] });
+  out({ type: "agent_start" });
+  out({ type: "turn_start", turnIndex: 0 });
+  if (retry === "recover") {
+    await new Promise((r) => setTimeout(r, turnDelay));
+    out({ type: "message_end", message: messageEnd(2) });
+    await new Promise((r) => setTimeout(r, turnDelay));
+  }
+  out({ type: "agent_end", messages: [] });
+  process.exit(0);
+}
+
 for (let i = 1; i <= turns; i++) {
   out({ type: "turn_start", turnIndex: i - 1 });
   await new Promise((r) => setTimeout(r, turnDelay));

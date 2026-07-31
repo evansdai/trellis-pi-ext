@@ -76,11 +76,14 @@ beyond it.
   run). **`sessionFile` is always a real, existing transcript** — the start
   record is delayed until the child's transcript is discoverable, and records
   are never written with a fabricated path. Running records carry an owner
-  marker (`<fleetId>.pid`, pid + 30s heartbeat). Startup reconciliation only
-  touches `running` records older than 60s **and only when the owner is
-  provably dead** (transcript missing, or the owner pid is no longer alive);
-  uncertain runs — including another pi process's live run — are left as
-  `running`.
+  marker (`<fleetId>.pid`, pid + process-birth identity). Startup
+  reconciliation only touches `running` records older than 60s **and only when
+  the owner is provably dead** (transcript missing, the owner pid is no longer
+  alive, or the pid was reused by an unrelated process — detected via the
+  Linux `/proc/<pid>/stat` starttime identity; on platforms without `/proc`
+  the check falls back to pid-liveness only, with PID-reuse leakage a
+  documented known limitation). Uncertain runs — including another pi
+  process's live run — are left as `running`.
 - `TRELLIS_PI_CLI_JS` (pre-existing) plus `PI_CODING_AGENT_DIR` /
   `PI_FLEET_RUNS_DIR` env overrides make the child CLI, agent discovery, and
   fleet output testable without a live profile.
