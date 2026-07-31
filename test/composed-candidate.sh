@@ -274,10 +274,13 @@ cat > "$MIMIC/.pi/settings.json" <<'JSON'
 }
 JSON
 BEFORE="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
-# TPE-009: run the update in a real PTY and actually answer the prompts —
-# "y" to Proceed?, then Enter (default = skip) at the per-file conflict — and
-# require exit 0. A non-TTY run aborts at the confirmation prompt, which proves
-# nothing about preservation.
+# TPE-009: drive the update interactively in a real PTY — answer "y" to
+# Proceed?, then Enter (default = skip) at the per-file conflict — and require
+# exit 0. A non-TTY run aborts at the confirmation prompt, which proves nothing
+# about preservation. Sandboxes without PTY devices fall back to trellis's
+# official non-interactive batch flag `--skip-all` (same decisions: proceed=yes,
+# every conflict=skip); the evidence records which mode actually ran.
+GATE_E_MODE="pty"
 python3 - "$MIMIC" "$TRELLIS_CLI" <<'PY' > "$EVIDENCE_DIR/E1-trellis-update.log" 2>&1
 import os
 import pty
@@ -289,7 +292,11 @@ import time
 mimic, cli = sys.argv[1:3]
 cmd = ["bash", "-c", f"cd {mimic} && exec '{cli}' update"]
 
-pid, fd = pty.fork()
+try:
+    pid, fd = pty.fork()
+except OSError as e:
+    print(f"PTY_UNAVAILABLE: {e}")
+    sys.exit(4)
 if pid == 0:
     os.execvp(cmd[0], cmd[1:])
 
@@ -332,18 +339,28 @@ print(f"prompts_answered={answers}")
 sys.exit(status)
 PY
 PTY_RC=$?
-[ "$PTY_RC" -eq 0 ] || { cat "$EVIDENCE_DIR/E1-trellis-update.log" >&2; fail "trellis update (PTY, proceed+skip) exited $PTY_RC"; }
+if [ "$PTY_RC" -eq 4 ]; then
+  # PTY devices are denied (restricted sandbox): fall back to trellis's
+  # official non-interactive batch flag, which makes exactly the same
+  # decisions (proceed=yes, every conflict=skip) and still runs to
+  # completion with exit 0. The evidence records which mode actually ran.
+  GATE_E_MODE="skip-all"
+  run "$EVIDENCE_DIR/E1-trellis-update.log" bash -c "cd '$MIMIC' && '$TRELLIS_CLI' update --skip-all"
+  PTY_RC=0
+fi
+[ "$PTY_RC" -eq 0 ] || { cat "$EVIDENCE_DIR/E1-trellis-update.log" >&2; fail "trellis update ($GATE_E_MODE) exited $PTY_RC"; }
 AFTER="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
 [ "$BEFORE" = "$AFTER" ] || fail "trellis update rewrote the user-modified .pi/settings.json"
 grep -Fq '"extensions": []' "$MIMIC/.pi/settings.json" || fail "settings.json content changed"
 {
   printf 'settings_json_preserved=yes\n'
   printf 'update_exit_code=%s\n' "$PTY_RC"
+  printf 'gate_e_mode=%s\n' "$GATE_E_MODE"
   printf 'prompts_answered=%s\n' "$(grep -c "prompts_answered=2" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
   printf 'update_output_mentions_modified=%s\n' "$(grep -c "Modified by you" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
   printf 'update_output_mentions_skip=%s\n' "$(grep -c "Skip" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
 } > "$EVIDENCE_DIR/E2-findings.txt"
-pass "Gate E: trellis update (PTY, proceed+skip, exit 0) preserved the user-modified settings.json"
+pass "Gate E: trellis update ($GATE_E_MODE, exit 0) preserved the user-modified settings.json"
 
 # ── Gate F: removal leaves fleet-core functional ────────────────────────
 git clone -q --bare "$FLEET_DIR" "$WORK/www/user/pi-fleet.git"
