@@ -1,9 +1,11 @@
 # Phase 1–2 evidence — `@evansdai/trellis-pi-ext` fork
 
 **Evidence date:** `[AS OF: 2026-08-01]` (session clock); Pi 0.83.0 / Trellis 0.6.11.
-**Fork commit:** `36524bb` (HEAD after the oracle-follow-up fixes; history:
-`da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` → `36524bb`; the working-copy
-history was recreated cleanly after an index accident — see note below).
+**Fork commit:** `36524bb` (the code+gate HEAD the composed gates proved;
+final docs HEAD `ac7d871` adds this resolution table; history:
+`da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` → `36524bb` → `ac7d871`; the
+working-copy history was recreated cleanly after an index accident — see note
+below).
 **Logs:** `phase-1-2-evidence/logs/` (gitignored; retained on this machine).
 
 ## Verified facts
