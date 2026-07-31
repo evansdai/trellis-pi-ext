@@ -1,0 +1,22 @@
+{
+  "name": "@evansdai/trellis-pi-ext",
+  "version": "0.1.0",
+  "description": "Repository-owned Pi extension fork of the @mindfoldhq/trellis generated Pi extension: trellis_subagent tool, Trellis SessionStart context, fleet producer, subagent frontmatter config compat.",
+  "type": "module",
+  "main": "./index.ts",
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "license": "AGPL-3.0-only",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

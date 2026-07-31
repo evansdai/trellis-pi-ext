@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# evidence logs (retained locally; FINDINGS.md is the committed summary)
+phase-1-2-evidence/*
+!phase-1-2-evidence/FINDINGS.md
