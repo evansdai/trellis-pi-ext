@@ -1,8 +1,9 @@
 # Phase 1–2 evidence — `@evansdai/trellis-pi-ext` fork
 
 **Evidence date:** `[AS OF: 2026-08-01]` (session clock); Pi 0.83.0 / Trellis 0.6.11.
-**Fork commit:** `da2f5e3` (single squashed commit; working-copy history was
-recreated cleanly after an index accident — see note below).
+**Fork commit:** `36524bb` (HEAD after the oracle-follow-up fixes; history:
+`da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` → `36524bb`; the working-copy
+history was recreated cleanly after an index accident — see note below).
 **Logs:** `phase-1-2-evidence/logs/` (gitignored; retained on this machine).
 
 ## Verified facts
@@ -35,9 +36,9 @@ e.g. 2026-07-31T22-01-08-053Z_producer-gate-1-ms9hli9t-1065f1.jsonl
 ```
 
 The timestamp is computed by the **child** at session init, so the fork
-discovers the transcript by glob `*_<fleetId>.jsonl` (newest mtime wins) and
-falls back to an expected path from its own timestamp when the child has not
-flushed yet (v1 requires a non-empty `sessionFile` even for `running`).
+discovers the transcript by glob `*_<fleetId>.jsonl` (newest mtime wins). The
+start record is **delayed** until discovery finds an existing file; a path is
+never fabricated (TPE-004 — the prior expected-path fallback was removed).
 
 ### Global agent-dir env resolution
 
@@ -82,9 +83,10 @@ semantics). Everything else in design.md was implemented as specified.
 
 Also note: the retired frankenstein `reconcileFleetRuns` reconciled **all**
 sources unconditionally at startup; the fork scopes reconciliation to the
-`trellis` source dir and only flags `running` records older than 60 s
-(`RECONCILE_MIN_AGE_MS`), so a concurrently live run (second pi instance) is
-never clobbered.
+`trellis` source dir and, since the oracle follow-up, only flags `running`
+records older than 60 s **when the owner is provably dead** (transcript
+missing or owner-pid marker dead) — a concurrently live run (second pi
+instance) is never clobbered (TPE-005).
 
 ## Gate results (composed-candidate.sh, disposable profiles, offline)
 
@@ -95,10 +97,46 @@ never clobbered.
 | B composed jiti load (fork + fleet-core + gotgenes 19.2.1) | PASS | exactly one `trellis_subagent`; exactly one `fleet` command (+ pi-subagents' own `subagents:settings`/`subagents:sessions`); no `ctrl+s` (only `alt+o`); `before_agent_start` present; global-only agent resolves from a foreign project; project file overrides |
 | C max_turns gate | PASS | old generated ext: 0 `maxTurns` symbols, 0 `--session-id` flags, 0 fleet-record writer (fail-before); fork's focused loop test passes (abort at N+2, unlimited for 0/unset) |
 | D fleet producer | PASS | scripted run → v1 record with real `sessionFile`; `view-session.mjs --preview` renders it; `pi-fleet --list` roster shows the run; stale record reconciled at startup |
-| E trellis update | PASS | user-modified `.pi/settings.json` classified "Modified by you", preserved byte-identical; non-TTY update aborts at confirm |
+| E trellis update | PASS | user-modified `.pi/settings.json` classified "Modified by you", preserved byte-identical; update ran to completion with exit 0 (`--skip-all` fallback; see TPE-009 note — the sandbox denies PTY allocation, so the interactive PTY driver could not run here) |
 | F removal | PASS | uninstalling the fork leaves fleet-core installed + headless start clean |
 
-Unit suite: 25/25 (`npm run check`: typecheck + tests).
+Unit suite: 50/50 (`npm run check`: typecheck + tests; 25/25 pre-follow-up).
+Every new regression fails on the pre-fix code path where feasible (verified
+by running the new suites against `bdf4628:index.ts`: TPE-001 write-path,
+TPE-003 stopReason, TPE-004 no-fabrication, and TPE-005 reconcile regressions
+all fail on the old code; agent-discovery file fails to load because the old
+code lacks `agentNameError`/`sanitizeFleetId`).
+
+## Oracle follow-up (TPE-001…TPE-012) — resolutions
+
+All findings from the independent oracle review of `bdf4628` were accepted.
+Resolution table (finding → fix → verification):
+
+| # | Finding | Fix | Verification |
+|---|---|---|---|
+| TPE-001 | agent-name path traversal (read + fleet-record paths) | `AGENT_NAME_RE` `^trellis-[A-Za-z0-9][A-Za-z0-9._-]*$`; `agentNameError()` tool error; `agentFilePath()` containment assert; `sanitizeFleetId()` for fleet/session ids | `agentNameError` rejection table; escaped-file read regression; `writeTrellisFleetRecord` traversal-id rejection; sanitize tests; Gate B name checks |
+| TPE-002 | project agents not trust-gated | `PiExtensionContext.isProjectTrusted`; project tier only when trusted; untrusted falls back to global tier | trusted/untrusted resolution tests; `buildPrompt` trust flag; Gate B trust assertions |
+| TPE-003 | JSON-mode failures misreported as success | `applyEvent` maps `stopReason` error→failed / aborted→cancelled; `agent_end` cannot overwrite terminal state; exit-0 close derives `failed` from final state | exit-0 `stopReason=error/aborted` tests; terminal records validated against the fleet-core v1 validator |
+| TPE-004 | fabricated sessionFile | `resolveSessionFile` returns null unless a real transcript exists; start record delayed until discovery succeeds; terminal/reconcile re-resolve; unopenable records dropped | null-fallback test; skip-write test; missing-transcript drop test; Gate D real `sessionFile` |
+| TPE-005 | reconcile cancels other processes' live runs | owner marker `<fleetId>.pid` (pid + 30s heartbeat); reconcile only cancels when the transcript is missing or the owner pid is dead; uncertain stays `running` | two-process regression (live pid survives 120s-old record); no-marker stays running; dead-pid cancels; Gate A/D stale markers now carry a real transcript + dead pid |
+| TPE-006 | frontmatter YAML values ignored | `cleanYamlScalar` (quote-aware `#` comments + unquoting) applied to all fields; case-insensitive booleans; documented scalar subset | inline-comment, `TRUE`/`FALSE`, quoted `"7"`→7, flow/block list comment regressions; README documents the subset (no YAML-parity claim) |
+| TPE-007 | primary-prompt lifecycle tests missing | `test/lifecycle.test.ts`: inject, suppress, other-primary, dispose→re-inject, receiver-binding (class method reading `this`), fresh jiti module instance via `Symbol.for` | 6 lifecycle tests pass; fresh instance loaded from a temp copy of `index.ts` via jiti |
+| TPE-008 | owner-specific test paths | `test/fleet-validator.mjs` resolves `FLEET_CORE_DIR` or the vendored SHA-pinned fixture `test/fixtures/fleet-record-v1.mjs` (fleet-core `2698d3a`); drift-guard test when `FLEET_CORE_DIR` is set; Gate D validator via `$FLEET_DIR/fleet-record-v1.mjs`; gate preflights all prerequisites | `npm run check` passes from the clean tree with no env vars; 13/13 with `FLEET_CORE_DIR` set |
+| TPE-009 | Gate E proved only an aborted update | PTY driver (proceed=y, conflict=Enter/skip, exit 0 required) with an honest fallback to `trellis update --skip-all` (official batch flag, same decisions) when the sandbox denies PTY allocation | Gate E passes with exit 0, byte-identical settings.json, `✅ Update complete!`; `E1-pty-attempt.log` records `PTY_UNAVAILABLE: out of pty devices`; `E2-findings.txt` records `gate_e_mode=skip-all` |
+| TPE-010 | AGPL §5(a) notice lacked a date | LICENSE + README: "Modified from the Trellis 0.6.11 Pi extension template by Evans Dai on 2026-08-01" | committed text |
+| TPE-011 | FINDINGS provenance stale | this table + HEAD `36524bb` + full history | — |
+| TPE-012 | max_turns regression too loose | exact `=== N+2` assertion (slow turn cadence + SIGTERM-handled fake child); AbortSignal cancellation case; delayed stdin-error case | 3 tests pass; fail-before verified for the stopReason pair |
+
+**Gate E evidence note (TPE-009):** the interactive PTY path is implemented in
+`test/composed-candidate.sh` but this sandbox cannot allocate PTYs
+(`openpty`: out of pty devices; `script`: Permission denied — all 10 `/dev/pts`
+slots belong to the sandbox). The recorded evidence here therefore uses the
+fallback `--skip-all` mode — trellis's official non-interactive batch flag that
+makes exactly the same decisions (proceed=yes, every conflict=skip) — and the
+update ran to completion (`✅ Update complete! (unknown → 0.6.11)`), exit 0,
+with `.pi/settings.json` byte-identical and classified "Modified by you". On a
+PTY-capable machine the gate runs the interactive driver instead and records
+`gate_e_mode=pty`.
 
 ## Repo hygiene note
 
@@ -120,7 +158,8 @@ commit `da2f5e3`; `git ls-files` = 16 files, no `node_modules/`.
   global `~/.pi/agent/agents/`, pilot a session.
 - Patch retirement (Phase 5): `trellis-0.6.11-primary-prompt.patch` after the
   unpatched-behavior gate — the fork carries the behavior (verified in Gate B
-  via `before_agent_start` presence and the retained source), so the gate is
-  the composed smoke + a live pilot, not a re-patch.
+  via `before_agent_start` presence and in `test/lifecycle.test.ts`: child
+  suppression, receiver binding, Symbol.for shared state across module
+  instances), so the gate is the composed smoke + a live pilot, not a re-patch.
 - `inherit_context: true` / `prompt_mode: append` full semantics remain
   deferred (fields parsed only), per the approved scope.
