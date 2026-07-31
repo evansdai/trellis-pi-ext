@@ -1,7 +1,8 @@
 # Phase 1–2 evidence — `@evansdai/trellis-pi-ext` fork
 
 **Evidence date:** `[AS OF: 2026-08-01]` (session clock); Pi 0.83.0 / Trellis 0.6.11.
-**Fork commits:** `274d6ae` (skeleton) → `2b435e6` (Phase 1) → … → `6a98438` (Phase 2 gates).
+**Fork commit:** `da2f5e3` (single squashed commit; working-copy history was
+recreated cleanly after an index accident — see note below).
 **Logs:** `phase-1-2-evidence/logs/` (gitignored; retained on this machine).
 
 ## Verified facts
@@ -98,6 +99,15 @@ never clobbered.
 | F removal | PASS | uninstalling the fork leaves fleet-core installed + headless start clean |
 
 Unit suite: 25/25 (`npm run check`: typecheck + tests).
+
+## Repo hygiene note
+
+During Phase 2 the evidence-log ignore pattern was clobbered (a `printf >`
+overwrite mistake compounded by the sandbox denying whole commands), which
+briefly tracked `node_modules/` and the evidence logs. The unpublished repo
+was recreated from the (byte-identical) working tree into the single clean
+commit `da2f5e3`; `git ls-files` = 16 files, no `node_modules/`.
+
 
 ## Open items for Phase 3+
 
