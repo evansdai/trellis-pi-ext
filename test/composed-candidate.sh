@@ -32,6 +32,7 @@ FORK_DIR="$(realpath -- "$(dirname -- "$0")/..")"
 FLEET_DIR="${PI_FLEET_PACKAGE_DIR:-$HOME/.pi/.fleet-core}"
 OLD_EXT="${TRELLIS_OLD_EXT:-$HOME/.pi/.pi/extensions/trellis/index.ts}"
 GOTGENES="${GOTGENES_SUBAGENTS_DIR:-$HOME/.pi/agent/npm/node_modules/@gotgenes/pi-subagents}"
+TRELLIS_CLI="${TRELLIS_CLI_BIN:-$HOME/.pi/agent/npm/node_modules/.bin/trellis}"
 TSX="$FORK_DIR/node_modules/.bin/tsx"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/trellis-pi-ext-composed.XXXXXX")"
@@ -68,9 +69,11 @@ for command in git node pi python3; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is not on PATH"
 done
 [ -f "$FORK_DIR/package.json" ] || fail "fork package not found at $FORK_DIR"
-[ -f "$FLEET_DIR/package.json" ] || fail "fleet-core package not found at $FLEET_DIR"
-[ -f "$OLD_EXT" ] || fail "old generated trellis ext not found at $OLD_EXT"
-[ -d "$GOTGENES/src" ] || fail "gotgenes pi-subagents source not found at $GOTGENES"
+[ -f "$FLEET_DIR/package.json" ] || fail "fleet-core package not found at $FLEET_DIR (set PI_FLEET_PACKAGE_DIR)"
+[ -f "$FLEET_DIR/fleet-record-v1.mjs" ] || fail "fleet-core validator not found at $FLEET_DIR/fleet-record-v1.mjs"
+[ -f "$OLD_EXT" ] || fail "old generated trellis ext not found at $OLD_EXT (set TRELLIS_OLD_EXT)"
+[ -d "$GOTGENES/src" ] || fail "gotgenes pi-subagents source not found at $GOTGENES (set GOTGENES_SUBAGENTS_DIR)"
+[ -x "$TRELLIS_CLI" ] || fail "trellis CLI not found at $TRELLIS_CLI (set TRELLIS_CLI_BIN)"
 [ -x "$TSX" ] || fail "tsx not installed in the fork repo (npm install first)"
 [ -n "$(git -C "$FORK_DIR" status --porcelain 2>/dev/null)" ] && fail "fork worktree is dirty; commit or stash before proving"
 [ -n "$(git -C "$FLEET_DIR" status --porcelain 2>/dev/null)" ] && fail "fleet-core worktree is dirty; commit or stash before proving"
@@ -92,13 +95,20 @@ export PI_DIR
 [[ "$FORK_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "bad fork HEAD"
 [[ "$FLEET_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "bad fleet-core HEAD"
 
-# Plant a stale "running" record; a successful headless start must reconcile it
-# — the marker that the fork extension actually loaded in a real pi process.
+# Plant a stale "running" record that reconcile MUST cancel: a real transcript
+# (so the record is openable) plus an owner marker whose pid is guaranteed dead.
+# A headless start must reconcile it — the marker that the fork extension
+# actually loaded in a real pi process. (TPE-004/005: reconcile only cancels
+# when the owner is provably dead; a live owner would be left running.)
 plant_stale() { # $1 = runs dir
   local dir="$1/trellis"
   mkdir -p "$dir"
   local ts
   ts=$(( $(date +%s) * 1000 - 120000 ))
+  local dead_pid
+  dead_pid="$(node -e 'const {spawn}=require("node:child_process");const c=spawn(process.execPath,["-e","process.exit(0)"]);c.on("exit",()=>console.log(c.pid))')"
+  : > "$dir/2026-08-01T00-00-00-000Z_stale-proof.jsonl"
+  printf '{"pid":%s,"ts":%s}\n' "$dead_pid" "$ts" > "$dir/stale-proof.pid"
   cat > "$dir/stale-proof.json" <<JSON
 {"version":1,"source":"trellis","id":"stale-proof","agent":"trellis-implement","status":"running","startedAt":$ts,"finishedAt":null,"prompt":"stale","sessionFile":"$dir/2026-08-01T00-00-00-000Z_stale-proof.jsonl","error":null}
 JSON
@@ -232,7 +242,7 @@ node -e '
   const r = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const errs = validateFleetRunRecordV1(r);
   if (errs.length) { console.error(errs); process.exit(1); }
-' "/home/evans/.pi/agent/git/github.com/evansdai/pi-fleet/fleet-record-v1.mjs" "$RECORD" \
+' "$FLEET_DIR/fleet-record-v1.mjs" "$RECORD" \
   || fail "record fails FleetRunRecord v1 validation"
 run "$EVIDENCE_DIR/D2-view-session.log" node "$FLEET_DIR/bin/view-session.mjs" --preview "$SESSION_FILE"
 assert_file "fake answer" "$EVIDENCE_DIR/D2-view-session.log"
@@ -264,16 +274,76 @@ cat > "$MIMIC/.pi/settings.json" <<'JSON'
 }
 JSON
 BEFORE="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
-run "$EVIDENCE_DIR/E1-trellis-update.log" bash -c "cd '$MIMIC' && '$HOME/.pi/agent/npm/node_modules/.bin/trellis' update </dev/null 2>&1 || true"
+# TPE-009: run the update in a real PTY and actually answer the prompts —
+# "y" to Proceed?, then Enter (default = skip) at the per-file conflict — and
+# require exit 0. A non-TTY run aborts at the confirmation prompt, which proves
+# nothing about preservation.
+python3 - "$MIMIC" "$TRELLIS_CLI" <<'PY' > "$EVIDENCE_DIR/E1-trellis-update.log" 2>&1
+import os
+import pty
+import re
+import select
+import sys
+import time
+
+mimic, cli = sys.argv[1:3]
+cmd = ["bash", "-c", f"cd {mimic} && exec '{cli}' update"]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(cmd[0], cmd[1:])
+
+output = b""
+answers = 0
+
+def send(s):
+    os.write(fd, s.encode())
+
+status = None
+deadline = time.time() + 180
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.25)
+    if r:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output += chunk
+        text = output.decode(errors="replace")
+        if answers == 0 and re.search(r"Proceed\?", text):
+            send("y\n")
+            answers = 1
+        elif answers == 1 and re.search(r"has changes\.", text):
+            send("\n")  # list prompt: Enter selects the default = skip
+            answers = 2
+    wpid, st = os.waitpid(pid, os.WNOHANG)
+    if wpid == pid:
+        status = os.waitstatus_to_exitcode(st)
+        break
+
+if status is None:
+    os.kill(pid, 9)
+    os.waitpid(pid, 0)
+    print(f"PTY driver timed out; prompts answered: {answers}")
+    sys.exit(3)
+print(f"prompts_answered={answers}")
+sys.exit(status)
+PY
+PTY_RC=$?
+[ "$PTY_RC" -eq 0 ] || { cat "$EVIDENCE_DIR/E1-trellis-update.log" >&2; fail "trellis update (PTY, proceed+skip) exited $PTY_RC"; }
 AFTER="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
-[ "$BEFORE" = "$AFTER" ] || fail "trellis update silently rewrote the user-modified .pi/settings.json"
+[ "$BEFORE" = "$AFTER" ] || fail "trellis update rewrote the user-modified .pi/settings.json"
 grep -Fq '"extensions": []' "$MIMIC/.pi/settings.json" || fail "settings.json content changed"
 {
   printf 'settings_json_preserved=yes\n'
+  printf 'update_exit_code=%s\n' "$PTY_RC"
+  printf 'prompts_answered=%s\n' "$(grep -c "prompts_answered=2" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
   printf 'update_output_mentions_modified=%s\n' "$(grep -c "Modified by you" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
-  printf 'update_output_mentions_skipped=%s\n' "$(grep -c "Skip\|skipped" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
+  printf 'update_output_mentions_skip=%s\n' "$(grep -c "Skip" "$EVIDENCE_DIR/E1-trellis-update.log" || true)"
 } > "$EVIDENCE_DIR/E2-findings.txt"
-pass "Gate E: trellis update does not silently re-enable the generated ext (settings.json preserved)"
+pass "Gate E: trellis update (PTY, proceed+skip, exit 0) preserved the user-modified settings.json"
 
 # ── Gate F: removal leaves fleet-core functional ────────────────────────
 git clone -q --bare "$FLEET_DIR" "$WORK/www/user/pi-fleet.git"

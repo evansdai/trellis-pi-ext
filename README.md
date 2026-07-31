@@ -46,6 +46,13 @@ beyond it.
 - `parseAgentFM` reads `prompt_mode` (only explicit values honored; absent =
   current replace-style behavior), `inherit_context` (parsed; full forking
   semantics deferred), `max_turns` (integer ≥ 0; `0`/unset = unlimited).
+  Frontmatter is parsed as a **documented YAML scalar subset**: plain scalars,
+  single/double-quoted scalars, flow lists `[a, b]`, block lists `- item`, and
+  `#` inline comments (quote-aware); YAML booleans/integers are honored
+  (`TRUE`/`True`/`false`, `42 # comment`, `"7"`). Nested YAML structures,
+  anchors/aliases, and multi-line quoted scalars are NOT supported — keep
+  agent frontmatter flat. Invalid values are dropped (gotgenes semantics),
+  never coerced.
 - `runPi` enforces `max_turns` in the JSON-mode child loop: the child prompt
   carries a turn-budget directive ("wrap up now — provide your final answer"
   at the budget), the parent attempts a best-effort steering write at the
@@ -56,15 +63,32 @@ beyond it.
 - Trellis agent files resolve from project `.pi/agents/<name>.md` first, then
   global `$PI_CODING_AGENT_DIR/agents/<name>.md` (default `~/.pi/agent/agents/`).
   Default agent remains `trellis-implement`. No agent bodies are bundled.
+  **Project-tier agents are trust-gated**: when the project is untrusted
+  (`ctx.isProjectTrusted()` false), only the global tier is used, so an
+  untrusted repo cannot control model/tools/prompt/turn-limit config.
+  **Agent names are validated** (`trellis-[A-Za-z0-9][A-Za-z0-9._-]*`): path
+  traversal names are rejected with a tool error, agent-file lookups assert
+  containment, and fleet/session ids are derived from a sanitized identity.
 - Fleet producer (default on): the child pi runs with
   `--session-id <fleetId> --session-dir <PI_FLEET_RUNS_DIR>/trellis`
   (default `~/.pi/fleet/runs/trellis`) and the run writes a
   `FleetRunRecord` v1 `.json` (atomic tmp+rename, best-effort, never breaks a
-  run) with a real `sessionFile`. Stale `running` records older than 60s are
-  reconciled to `cancelled` at extension startup.
+  run). **`sessionFile` is always a real, existing transcript** — the start
+  record is delayed until the child's transcript is discoverable, and records
+  are never written with a fabricated path. Running records carry an owner
+  marker (`<fleetId>.pid`, pid + 30s heartbeat). Startup reconciliation only
+  touches `running` records older than 60s **and only when the owner is
+  provably dead** (transcript missing, or the owner pid is no longer alive);
+  uncertain runs — including another pi process's live run — are left as
+  `running`.
 - `TRELLIS_PI_CLI_JS` (pre-existing) plus `PI_CODING_AGENT_DIR` /
   `PI_FLEET_RUNS_DIR` env overrides make the child CLI, agent discovery, and
   fleet output testable without a live profile.
+- Tests are reproducible from a clean checkout: fleet-record v1 conformance
+  validates against a vendored SHA-pinned copy of the fleet-core validator
+  (`test/fixtures/fleet-record-v1.mjs`); set `FLEET_CORE_DIR` to a fleet-core
+  checkout to validate against the live contract instead (a drift-guard test
+  then asserts both match).
 
 ## Install
 
@@ -103,6 +127,9 @@ come from `PI_FLEET_RUNS_DIR` / `PI_CODING_AGENT_DIR` with documented defaults.
   (v0.6.11, © mindfold-ai), which is AGPL-3.0-only.
 - This fork is a derived work and is licensed **AGPL-3.0-only** with
   attribution (see `LICENSE`). No relicensing; attribution must be preserved.
+- AGPL §5(a) modification notice: **"Modified from the Trellis 0.6.11 Pi
+  extension template by Evans Dai on 2026-08-01"** (also recorded in
+  `LICENSE`).
 - Upstream status: `primary-prompt` behavior is a genuine local patch (not
   upstream-merged as of 2026-08-01); this fork makes it canonical source.
 
@@ -113,6 +140,12 @@ npm install        # dev tooling only
 npm run check      # typecheck + tests
 ```
 
-Tests cover: frontmatter parsing, `max_turns` loop bounding (scripted child),
-global-vs-project agent resolution, fleet-record v1 conformance, and
-registration smoke.
+Tests cover: frontmatter parsing (incl. YAML scalars/comments/booleans),
+`max_turns` loop bounding (scripted child: exact N+grace abort, unlimited for
+0/unset, AbortSignal cancellation, delayed steering write), JSON-mode
+`stopReason` error/aborted handling with v1-valid terminal records,
+global-vs-project agent resolution (incl. project-trust gating and agent-name
+traversal rejection), fleet-record v1 conformance (no fabricated
+`sessionFile`; owner-pid reconcile semantics incl. the two-process regression),
+primary-prompt lifecycle behavior (child suppression, receiver binding,
+Symbol.for shared state across module instances), and registration smoke.

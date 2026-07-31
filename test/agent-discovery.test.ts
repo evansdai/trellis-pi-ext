@@ -4,11 +4,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  agentNameError,
   buildPrompt,
   globalAgentsDir,
   isTrellisAgent,
   parseAgentFM,
   readTrellisAgent,
+  sanitizeFleetId,
 } from "../index.ts";
 
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-agents-"));
@@ -75,4 +77,94 @@ test("buildPrompt uses the resolved (global) agent definition body", () => {
   assert.match(prompt, /Global-only body/);
   assert.match(prompt, /## Delegated Task/);
   assert.match(prompt, /do it/);
+});
+
+// ── TPE-002: project agents are trust-gated ────────────────────────────
+
+test("untrusted projects cannot resolve project-tier agents", () => {
+  // trellis-project.md exists only in the project tier: untrusted -> gone.
+  assert.equal(
+    isTrellisAgent(projectRoot, "trellis-project", false),
+    false,
+    "project-tier agent must not resolve in an untrusted project",
+  );
+  assert.equal(readTrellisAgent(projectRoot, "trellis-project", false), "");
+  // trusted -> project tier works as before
+  assert.equal(isTrellisAgent(projectRoot, "trellis-project", true), true);
+});
+
+test("untrusted projects fall back to the global tier (project no longer wins)", () => {
+  // trellis-shared exists in both tiers with different bodies.
+  const raw = readTrellisAgent(projectRoot, "trellis-shared", false);
+  assert.equal(raw, GLOBAL_SHARED, "untrusted: global body must win over the project body");
+  assert.equal(
+    parseAgentFM(raw).model,
+    "global-shared-model",
+  );
+  assert.equal(
+    readTrellisAgent(projectRoot, "trellis-shared", true),
+    PROJECT_SHARED,
+    "trusted: project override still applies",
+  );
+});
+
+test("untrusted projects still resolve global-only agents", () => {
+  assert.equal(isTrellisAgent(projectRoot, "trellis-global", false), true);
+  assert.equal(readTrellisAgent(projectRoot, "trellis-global", false), GLOBAL_ONLY);
+});
+
+test("buildPrompt honors the trust flag", () => {
+  const untrustedPrompt = buildPrompt(
+    projectRoot,
+    { agent: "trellis-shared", prompt: "x" },
+    null,
+    false,
+  );
+  assert.match(untrustedPrompt, /Global shared body/);
+  assert.doesNotMatch(untrustedPrompt, /Project shared body/);
+  const trustedPrompt = buildPrompt(projectRoot, { agent: "trellis-shared", prompt: "x" }, null, true);
+  assert.match(trustedPrompt, /Project shared body/);
+});
+
+// ── TPE-001: agent-name path traversal ─────────────────────────────────
+
+test("agentNameError rejects traversal and separator names", () => {
+  for (const bad of [
+    "../escape",
+    "trellis-../escape",
+    "a/b",
+    "a\\b",
+    "..",
+    "trellis-..",
+    ".hidden",
+    "trellis-.hidden",
+    "",
+    "/etc/passwd",
+    "trellis-x/y",
+  ])
+    assert.notEqual(agentNameError(bad), null, `name must be rejected: ${JSON.stringify(bad)}`);
+  for (const good of ["trellis-implement", "implement", "trellis-check", "trellis-A1_b-c.d"])
+    assert.equal(agentNameError(good), null, `name must be accepted: ${JSON.stringify(good)}`);
+});
+
+test("read/isTrellisAgent never follow an escaped agent path", () => {
+  // Plant a file exactly where a traversal would escape to: it must be
+  // invisible to agent resolution.
+  const escapeTarget = join(work, "agents-escape.md");
+  writeFileSync(escapeTarget, "---\nmodel: escaped\n---\nESCAPED BODY");
+  assert.equal(isTrellisAgent(projectRoot, "trellis-../agents-escape"), false);
+  assert.equal(readTrellisAgent(projectRoot, "trellis-../agents-escape"), "");
+  assert.equal(
+    readTrellisAgent(projectRoot, "trellis-..\\agents-escape"),
+    "",
+  );
+  assert.equal(readTrellisAgent(projectRoot, "../agents-escape"), "");
+});
+
+test("sanitizeFleetId never carries path separators or traversal", () => {
+  assert.equal(sanitizeFleetId("trellis-implement-1"), "trellis-implement-1");
+  assert.equal(sanitizeFleetId("a/b\\c"), "a_b_c");
+  assert.equal(sanitizeFleetId("../escape"), "escape");
+  assert.equal(sanitizeFleetId("x y z"), "x_y_z");
+  assert.equal(/[^A-Za-z0-9._-]/.test(sanitizeFleetId("../../..")), false);
 });

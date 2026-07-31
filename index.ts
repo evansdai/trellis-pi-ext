@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
@@ -15,6 +16,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
 } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -37,6 +39,8 @@ interface PiExtensionContext {
     getSessionId?: () => string;
     getSessionFile?: () => string | undefined;
   };
+  /** Pi surfaces this on the tool-execution context (see agent-session.js). */
+  isProjectTrusted?: () => boolean;
   ui?: {
     notify?: (msg: string, type?: "info" | "warning" | "error") => void;
   };
@@ -112,6 +116,17 @@ const RECONCILE_MIN_AGE_MS = 60_000;
 /** FleetRunRecord v1 disk contract (see fleet-core fleet-record-v1.mjs). */
 const FLEET_RECORD_VERSION = 1;
 const FLEET_RUN_DIR = "trellis";
+/**
+ * Trellis agent names must be a basename only. The name is tool-controlled and
+ * flows into agent-file paths and fleet record/session names, so anything that
+ * does not match is rejected outright (no `../`, no separators, no absolute
+ * paths). The `trellis-` prefix is required after normalization.
+ */
+const AGENT_NAME_RE = /^trellis-[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** Fleet ids are derived from sanitized run state; must stay basename-safe. */
+const FLEET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** Throttle for the fleet owner-marker heartbeat (see refreshFleetHeartbeat). */
+const FLEET_HEARTBEAT_MS = 30_000;
 /** Best-effort steering write at the turn limit (see runPi). */
 const TURN_LIMIT_STEERING =
   "wrap up now — provide your final answer for the delegated task and stop.";
@@ -821,11 +836,12 @@ function toFleetStatus(status: RunStatus): FleetRecordStatus {
 /**
  * Pi names session files `<ISO-ts with :/. -> ->_<sessionId>.jsonl`; the
  * timestamp is computed by the child at session init, so discover by the
- * `<fleetId>` suffix and pick the newest. Falls back to an expected path from
- * our own timestamp so v1's non-empty sessionFile holds even before the child
- * has flushed its first entry.
+ * `<fleetId>` suffix and pick the newest. Returns null when no transcript
+ * exists yet — callers must never fabricate a path (the child's timestamp is
+ * not predictable from the parent's).
  */
-export function resolveSessionFile(fleetId: string): string {
+export function resolveSessionFile(fleetId: string): string | null {
+  if (!FLEET_ID_RE.test(fleetId)) return null;
   const dir = trellisFleetDir();
   let newest: { name: string; mtime: number } | null = null;
   try {
@@ -836,11 +852,9 @@ export function resolveSessionFile(fleetId: string): string {
       if (!newest || mtime > newest.mtime) newest = { name, mtime };
     }
   } catch {
-    /* dir missing — fall through to expected path */
+    return null; // dir missing — no transcript yet
   }
-  if (newest) return join(dir, newest.name);
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  return join(dir, `${ts}_${fleetId}.jsonl`);
+  return newest ? join(dir, newest.name) : null;
 }
 
 function fleetRecordFor(state: RunState, fleetId: string): FleetRunRecord {
@@ -853,14 +867,23 @@ function fleetRecordFor(state: RunState, fleetId: string): FleetRunRecord {
     startedAt: state.startedAt ?? Date.now(),
     finishedAt: state.finishedAt ?? null,
     prompt: state.prompt.slice(0, 200),
-    sessionFile: resolveSessionFile(fleetId),
+    sessionFile: resolveSessionFile(fleetId) ?? "",
     error: state.errorMessage ?? null,
   };
 }
 
-/** Write the run record atomically (tmp + rename); best-effort, never breaks a run. */
+/**
+ * Write the run record atomically (tmp + rename); best-effort, never breaks a
+ * run. Skips silently when the fleet id is unsafe or no real transcript exists
+ * yet (never fabricates a sessionFile). Running records carry a sidecar owner
+ * marker (`<fleetId>.pid`, pid + heartbeat) so reconcile can distinguish a
+ * dead owner from another process's live run; terminal writes remove it.
+ */
 export function writeTrellisFleetRecord(state: RunState, fleetId: string): void {
   try {
+    if (!FLEET_ID_RE.test(fleetId)) return; // never trust an unvalidated id
+    const file = resolveSessionFile(fleetId);
+    if (!file) return; // no real transcript yet — do not fabricate a path
     const dir = trellisFleetDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const dest = join(dir, `${fleetId}.json`);
@@ -871,15 +894,81 @@ export function writeTrellisFleetRecord(state: RunState, fleetId: string): void 
       mode: 0o600,
     });
     renameSync(tmp, dest);
+    if (toFleetStatus(state.status) === "running") {
+      writeFleetOwnerMarker(fleetId);
+    } else {
+      removeFleetOwnerMarker(fleetId);
+    }
   } catch {
     /* best-effort: fleet records must never break a run */
   }
 }
 
+function writeFleetOwnerMarker(fleetId: string): void {
+  try {
+    const dir = trellisFleetDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(dir, `${fleetId}.pid`),
+      JSON.stringify({ pid: process.pid, ts: Date.now() }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
+function removeFleetOwnerMarker(fleetId: string): void {
+  try {
+    unlinkSync(join(trellisFleetDir(), `${fleetId}.pid`));
+  } catch {
+    /* best-effort */
+  }
+}
+
+function readFleetOwnerMarker(
+  dir: string,
+  fleetId: string,
+): { pid: number; ts: number } | null {
+  if (!FLEET_ID_RE.test(fleetId)) return null;
+  try {
+    const raw = JSON.parse(readText(join(dir, `${fleetId}.pid`))) as JsonObject;
+    const pid = typeof raw.pid === "number" ? raw.pid : NaN;
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return { pid, ts: typeof raw.ts === "number" ? raw.ts : 0 };
+  } catch {
+    return null;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
- * Flag orphaned trellis "running" records from a previous pi process as
- * cancelled. Only records older than RECONCILE_MIN_AGE_MS are touched so a
- * concurrently live run (e.g. a second pi instance) is never clobbered.
+ * Throttled heartbeat for the current run's owner marker. Called from the
+ * JSON-mode event loop; the marker proves the owner process is alive even for
+ * runs started by an earlier pi process.
+ */
+let lastFleetHeartbeat = 0;
+function refreshFleetHeartbeat(fleetId: string): void {
+  const now = Date.now();
+  if (now - lastFleetHeartbeat < FLEET_HEARTBEAT_MS) return;
+  lastFleetHeartbeat = now;
+  writeFleetOwnerMarker(fleetId);
+}
+
+/**
+ * Reconcile orphaned trellis "running" records at extension startup. A record
+ * is only touched when it is at least RECONCILE_MIN_AGE_MS old, and only when
+ * the owner can be proven dead: the session transcript is missing (a live run
+ * always has one) or the owner marker's pid is no longer alive. Anything
+ * uncertain is left as `running` — never cancel another process's live run.
  */
 export function reconcileFleetRuns(): void {
   const dir = trellisFleetDir();
@@ -904,22 +993,57 @@ export function reconcileFleetRuns(): void {
     const startedAt =
       typeof record.startedAt === "number" ? record.startedAt : 0;
     if (now - startedAt < RECONCILE_MIN_AGE_MS) continue;
-    const id = typeof record.id === "string" ? record.id : file.slice(0, -5);
+    const id =
+      typeof record.id === "string" && FLEET_ID_RE.test(record.id)
+        ? record.id
+        : "";
+    let sessionFile =
+      typeof record.sessionFile === "string" && record.sessionFile
+        ? record.sessionFile
+        : "";
+    if (!sessionFile && id) sessionFile = resolveSessionFile(id) ?? "";
+    if (sessionFile && !exists(sessionFile)) {
+      // A live run always has its transcript; a missing one proves the run is
+      // dead (or its transcript was cleaned) — the record is unopenable, so
+      // drop it rather than preserve a bogus path.
+      try {
+        unlinkSync(dest);
+        if (id) removeFleetOwnerMarker(id);
+      } catch {
+        /* best-effort */
+      }
+      continue;
+    }
+    if (!sessionFile) {
+      // No transcript at all and none discoverable — drop the unopenable record.
+      try {
+        unlinkSync(dest);
+      } catch {
+        /* best-effort */
+      }
+      continue;
+    }
+    let reason = "";
+    if (id) {
+      const owner = readFleetOwnerMarker(dir, id);
+      if (owner && !pidAlive(owner.pid)) {
+        reason = "owner process exited";
+      }
+      // No marker, or a live owner pid: uncertain -> leave as running.
+    }
+    if (!reason) continue;
     const cancelled: FleetRunRecord = {
       version: FLEET_RECORD_VERSION,
       source: "trellis",
-      id,
+      id: id || file.slice(0, -5),
       agent: typeof record.agent === "string" ? record.agent : "unknown",
       status: "cancelled",
       startedAt,
       finishedAt: now,
       prompt:
         typeof record.prompt === "string" ? record.prompt.slice(0, 200) : "",
-      sessionFile:
-        typeof record.sessionFile === "string" && record.sessionFile
-          ? record.sessionFile
-          : resolveSessionFile(id),
-      error: "interrupted (stale trellis run reconciled at startup)",
+      sessionFile,
+      error: `interrupted (stale trellis run reconciled at startup; ${reason})`,
     };
     try {
       const tmp = join(dir, `.${file}.${process.pid}.tmp`);
@@ -928,6 +1052,7 @@ export function reconcileFleetRuns(): void {
         mode: 0o600,
       });
       renameSync(tmp, dest);
+      removeFleetOwnerMarker(id);
     } catch {
       /* best-effort */
     }
@@ -1214,27 +1339,31 @@ export function parseAgentFM(c: string): AgentConfig {
     if (!m) continue;
     const k = m[1] ?? "",
       v = m[2] ?? "";
+    // Supported frontmatter syntax is a documented YAML scalar subset: plain
+    // scalars, single/double-quoted scalars, flow lists `[a, b]`, block lists
+    // `- item`, and `#` inline comments (quote-aware). YAML booleans and
+    // integers are honored (case-insensitive true/false). Nested YAML
+    // structures, anchors/aliases, and multi-line quoted scalars are NOT
+    // supported — keep agent frontmatter flat. Invalid values are dropped
+    // (gotgenes semantics), never coerced.
+    const clean = (raw: string) =>
+      unquoteYaml(stripInlineComment(raw).trim()).trim();
+    const val = clean(v);
     if (k === "model")
-      cfg.model = v.trim().replace(/^["']|["']$/g, "") || undefined;
+      cfg.model = val || undefined;
     else if (k === "thinking")
-      cfg.thinking = (v.trim().replace(/^["']|["']$/g, "") || undefined) as
-        | string
-        | undefined;
+      cfg.thinking = (val || undefined) as string | undefined;
     else if (k === "fallbackModels" || k === "fallback_models") {
-      if (v.trim()) {
-        cfg.fallbackModels = v
-          .trim()
+      if (val) {
+        cfg.fallbackModels = val
           .replace(/^\[|\]$/g, "")
           .split(",")
-          .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+          .map(clean)
           .filter(Boolean);
       } else {
         i++;
         while (i < lines.length && /^\s+-\s/.test(lines[i] ?? "")) {
-          const item = (lines[i] ?? "")
-            .trim()
-            .replace(/^-\s+/, "")
-            .replace(/^["']|["']$/g, "");
+          const item = clean((lines[i] ?? "").replace(/^\s+-\s+/, ""));
           if (item) cfg.fallbackModels.push(item);
           i++;
         }
@@ -1243,23 +1372,23 @@ export function parseAgentFM(c: string): AgentConfig {
     } else if (k === "tools") {
       // Pi tool names are lowercase (read, bash, edit, write, grep, find, ls).
       // Normalize to lowercase so mixed-case frontmatter still matches.
-      if (v.trim()) {
-        cfg.tools = v
-          .trim()
+      if (val) {
+        cfg.tools = val
           .split(",")
-          .map((s) => s.trim().replace(/^["']|["']$/g, "").toLowerCase())
+          .map((s) => clean(s).toLowerCase())
           .filter(Boolean);
       }
     } else if (k === "prompt_mode") {
       // gotgenes dialect: only an explicit "append" is honored; absent keeps
       // the Trellis replace-style behavior (agent body is the system prompt).
-      cfg.promptMode = v.trim() === "append" ? "append" : "replace";
+      cfg.promptMode = val === "append" ? "append" : "replace";
     } else if (k === "inherit_context") {
-      // gotgenes dialect: parsed; full conversation-forking semantics deferred.
-      cfg.inheritContext = v.trim() === "true";
+      // gotgenes dialect: YAML booleans are case-insensitive; parsed only,
+      // full conversation-forking semantics deferred.
+      cfg.inheritContext = val.toLowerCase() === "true";
     } else if (k === "max_turns") {
       // gotgenes dialect: non-negative integer; 0/unset = unlimited.
-      const n = Number(v.trim());
+      const n = Number(val);
       cfg.maxTurns = Number.isInteger(n) && n >= 0 ? n : undefined;
     }
   }
@@ -1482,6 +1611,23 @@ function normalizeAgent(agent: string | undefined): string {
   return name.startsWith("trellis-") ? name : `trellis-${name}`;
 }
 
+/**
+ * Validate a tool-supplied agent name. Returns an error message, or null when
+ * the normalized name is a safe basename (`trellis-<alnum>…`). Never trust a
+ * raw name on a path: `join` would happily normalize embedded `../`.
+ */
+export function agentNameError(agent: string | undefined): string | null {
+  const name = normalizeAgent(agent);
+  if (!AGENT_NAME_RE.test(name))
+    return `Invalid Trellis agent name ${JSON.stringify(agent ?? null)}: names must match ${AGENT_NAME_RE} (basename only — no path separators, no \`..\`, no leading dots)`;
+  return null;
+}
+
+/** Basename-safe fleet id derived from run state; never the raw agent name. */
+export function sanitizeFleetId(raw: string): string {
+  return raw.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[^A-Za-z0-9]+/, "");
+}
+
 function projectAgentsDir(root: string): string {
   return join(root, ".pi", "agents");
 }
@@ -1492,28 +1638,60 @@ export function globalAgentsDir(): string {
   return join(envDir ?? join(homedir(), ".pi", "agent"), "agents");
 }
 
-/** Two-tier discovery: project <root>/.pi/agents wins over the global agents dir. */
-export function isTrellisAgent(root: string, agent: string): boolean {
-  return (
-    exists(join(projectAgentsDir(root), `${agent}.md`)) ||
-    exists(join(globalAgentsDir(), `${agent}.md`))
-  );
+/**
+ * Resolve `<agentsDir>/<name>.md` and assert the result stays directly inside
+ * the agents dir. Returns null for invalid names or escaped paths — never a
+ * path outside the intended directory.
+ */
+function agentFilePath(agentsDir: string, agent: string): string | null {
+  if (agentNameError(agent) !== null) return null;
+  const p = resolve(join(agentsDir, `${agent}.md`));
+  const base = resolve(agentsDir);
+  return p.startsWith(base + sep) ? p : null;
 }
 
-/** Read an agent definition: project file wins; else global; else "" (default path handles it). */
-export function readTrellisAgent(root: string, agent: string): string {
-  const project = join(projectAgentsDir(root), `${agent}.md`);
-  if (exists(project)) return readText(project);
-  return readText(join(globalAgentsDir(), `${agent}.md`));
+/**
+ * Two-tier discovery: project <root>/.pi/agents wins over the global agents
+ * dir, but only when the project is trusted. Untrusted projects fall back to
+ * the global tier so an untrusted repo cannot control model/tools/prompt/
+ * turn-limit config for this privileged extension.
+ */
+export function isTrellisAgent(
+  root: string,
+  agent: string,
+  projectTrusted = true,
+): boolean {
+  const project = agentFilePath(projectAgentsDir(root), agent);
+  if (projectTrusted && project && exists(project)) return true;
+  const global = agentFilePath(globalAgentsDir(), agent);
+  return global !== null && exists(global);
+}
+
+/**
+ * Read an agent definition: project file wins (when trusted); else global;
+ * else "" (the default-path fallback handles it). Invalid names read empty.
+ */
+export function readTrellisAgent(
+  root: string,
+  agent: string,
+  projectTrusted = true,
+): string {
+  if (projectTrusted) {
+    const project = agentFilePath(projectAgentsDir(root), agent);
+    if (project && exists(project)) return readText(project);
+  }
+  const global = agentFilePath(globalAgentsDir(), agent);
+  return global ? readText(global) : "";
 }
 
 export function buildPrompt(
   root: string,
   input: SubagentInput,
   key: string | null,
+  projectTrusted = true,
 ): string {
   const agent = normalizeAgent(input.agent);
-  const raw = readTrellisAgent(root, agent);
+  const raw = readTrellisAgent(root, agent, projectTrusted);
   const def = stripFM(raw);
   const ctx = buildContext(root, agent, key);
   return [
@@ -1589,6 +1767,23 @@ function applyEvent(r: RunState, evt: JsonObject): boolean {
       r.thinking = parsed.thinking;
     }
     if (typeof msg.errorMessage === "string") r.errorMessage = msg.errorMessage;
+    // Assistant stopReason is authoritative: an error/aborted message makes the
+    // run failed/cancelled even when the child process exits 0 afterwards, so
+    // agent_end and the close handler cannot misreport it as success.
+    const stopReason = typeof msg.stopReason === "string" ? msg.stopReason : "";
+    if (stopReason === "error") {
+      r.status = "failed";
+      r.errorMessage =
+        typeof msg.errorMessage === "string" && msg.errorMessage.trim()
+          ? msg.errorMessage
+          : "assistant stopReason=error";
+    } else if (stopReason === "aborted") {
+      r.status = "cancelled";
+      r.errorMessage =
+        typeof msg.errorMessage === "string" && msg.errorMessage.trim()
+          ? msg.errorMessage
+          : "assistant stopReason=aborted";
+    }
     return true;
   }
   if (type === "tool_execution_start") {
@@ -1675,7 +1870,11 @@ export function runPi(
     }
     const inv = resolvePiCli();
     // Unique per run: distinct from other parallel/chain runs and across calls.
-    const fleetId = `${state.id}-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+    // The id is sanitized — the raw agent name never flows into filesystem
+    // names (state.id embeds the agent name; see TPE-001).
+    const fleetId = sanitizeFleetId(
+      `${state.id}-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`,
+    );
     const childEnv = {
       ...process.env,
       TRELLIS_SUBAGENT_CHILD: "1",
@@ -1715,7 +1914,18 @@ export function runPi(
     state.status = "running";
     state.startedAt = Date.now();
     emit();
-    writeTrellisFleetRecord(state, fleetId); // start record (running)
+    // Start record (running): written lazily — only once the child has flushed
+    // its real transcript (TPE-004: never fabricate a sessionFile). Retried on
+    // every processed event; if the child exits without ever writing a
+    // transcript, no record is produced.
+    let startRecordWritten = false;
+    const writeStartRecord = () => {
+      if (startRecordWritten || settled) return;
+      if (!resolveSessionFile(fleetId)) return;
+      startRecordWritten = true;
+      writeTrellisFleetRecord(state, fleetId);
+    };
+    writeStartRecord();
     // max_turns enforcement: assistant turns are counted in applyEvent via
     // message_end(role=assistant). Pi -p consumes stdin to EOF before starting,
     // so the mid-run steering write below is best-effort (a no-op for -p
@@ -1735,6 +1945,8 @@ export function runPi(
     const processLine = (line: string) => {
       const evt = parseJsonEvent(line);
       if (!evt || !applyEvent(state, evt)) return;
+      writeStartRecord();
+      refreshFleetHeartbeat(fleetId);
       emit();
       if (maxTurns && maxTurns > 0) {
         const turns = state.usage.turns;
@@ -1792,9 +2004,13 @@ export function runPi(
       if (code === 0) {
         if (state.status === "pending" || state.status === "running")
           state.status = "succeeded";
+        // A JSON-mode assistant stopReason (error/aborted) already moved the
+        // state to a terminal failure; the child's exit code alone must not
+        // mask that (TPE-003).
+        const failed = state.status === "failed" || state.status === "cancelled";
         done({
           output: finalize(state, formatPiOutput(out, err)),
-          failed: false,
+          failed,
         });
         return;
       }
@@ -1819,9 +2035,10 @@ async function runSubagent(
   onUpdate?: (r: PiToolResult) => void,
   inheritedThinking?: string,
   inheritedModel?: string,
+  projectTrusted = true,
 ): Promise<{ output: string; details: ProgressDetails; failed: boolean }> {
   const agentName = normalizeAgent(input.agent);
-  const agentRaw = readTrellisAgent(root, agentName);
+  const agentRaw = readTrellisAgent(root, agentName, projectTrusted);
   const agentCfg = parseAgentFM(agentRaw);
   const runCfg = resolveRunCfg(
     input,
@@ -1881,7 +2098,7 @@ async function runSubagent(
         prompts.map((p, i) =>
           runPi(
             root,
-            buildPrompt(root, { ...input, prompt: p }, key),
+            buildPrompt(root, { ...input, prompt: p }, key, projectTrusted),
             runCfg,
             details.runs[i]!,
             emit,
@@ -1913,6 +2130,7 @@ async function runSubagent(
               prompt: prev ? `${p}\n\nPrevious output:\n${prev}` : p,
             },
             key,
+            projectTrusted,
           ),
           runCfg,
           rs,
@@ -1932,7 +2150,7 @@ async function runSubagent(
     emit(true);
     const result = await runPi(
       root,
-      buildPrompt(root, input, key),
+      buildPrompt(root, input, key, projectTrusted),
       runCfg,
       rs,
       emit,
@@ -2106,8 +2324,21 @@ export default function trellisExtension(pi: {
       ctx?: PiExtensionContext,
     ) => {
       activeSubagentToolCallId = id;
+      const nameErr = agentNameError(input.agent);
+      if (nameErr !== null) {
+        return {
+          content: [{ type: "text", text: nameErr }],
+          details: { agent: input.agent, error: "invalid agent name" },
+        };
+      }
       const agentName = normalizeAgent(input.agent);
-      if (!isTrellisAgent(root, agentName)) {
+      // Project agents are only trusted when the project itself is trusted;
+      // an untrusted project cannot steer this privileged extension's
+      // model/tools/prompt/turn-limit config (see TPE-002).
+      const projectTrusted = ctx?.isProjectTrusted
+        ? ctx.isProjectTrusted()
+        : true;
+      if (!isTrellisAgent(root, agentName, projectTrusted)) {
         return {
           content: [
             {
@@ -2163,6 +2394,7 @@ export default function trellisExtension(pi: {
         onUpdate,
         inheritedThinking,
         inheritedModel,
+        projectTrusted,
       );
       return {
         content: [{ type: "text", text: result.output }],

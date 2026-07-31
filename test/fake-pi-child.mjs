@@ -1,12 +1,19 @@
 // Scripted fake pi child for runPi tests, driven via TRELLIS_PI_CLI_JS.
 // Emits pi-like JSON-mode events to stdout and, like real pi, consumes stdin
 // to EOF before starting. Controlled by env:
-//   FAKE_PI_TURNS        assistant message_end events to emit (default 3)
-//   FAKE_PI_EXIT_AFTER   "1" -> exit 0 after the turns; else stay alive until killed
-//   FAKE_PI_SESSION      "1" -> write a v3 session JSONL into --session-dir like real pi
-//   FAKE_PI_PROMPT_FILE  write the received prompt text to this file (for assertions)
+//   FAKE_PI_TURNS          assistant message_end events to emit (default 3)
+//   FAKE_PI_EXIT_AFTER     "1" -> exit 0 after the turns; else stay alive until killed
+//   FAKE_PI_SESSION        "1" -> write a v3 session JSONL into --session-dir like real pi
+//   FAKE_PI_PROMPT_FILE    write the received prompt text to this file (for assertions)
+//   FAKE_PI_STOP_REASON    optional stopReason on every assistant message_end
+//   FAKE_PI_ERROR_MESSAGE  optional errorMessage on every assistant message_end
+//   FAKE_PI_TURN_DELAY_MS  delay between turns (default 10)
+// SIGTERM is handled so the parent's hard abort is deterministic: the child
+// stops emitting immediately instead of racing one more turn.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+process.on("SIGTERM", () => process.exit(143));
 
 const args = process.argv.slice(2);
 const getArg = (name) => {
@@ -27,8 +34,30 @@ if (process.env.FAKE_PI_PROMPT_FILE) {
 const turns = Number(process.env.FAKE_PI_TURNS ?? "3");
 const exitAfter = process.env.FAKE_PI_EXIT_AFTER === "1";
 const writeSession = process.env.FAKE_PI_SESSION === "1";
+const stopReason = process.env.FAKE_PI_STOP_REASON;
+const errorMessage = process.env.FAKE_PI_ERROR_MESSAGE;
+const turnDelay = Number(process.env.FAKE_PI_TURN_DELAY_MS ?? "10");
 
 const out = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+
+const messageEnd = (i) => {
+  const msg = {
+    role: "assistant",
+    content: [{ type: "text", text: `fake answer ${i}` }],
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: { total: 0 },
+      totalTokens: 2,
+    },
+    model: "fake/model",
+  };
+  if (stopReason) msg.stopReason = stopReason;
+  if (errorMessage) msg.errorMessage = errorMessage;
+  return msg;
+};
 
 if (writeSession && sessionDir && sessionId) {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -59,19 +88,7 @@ if (writeSession && sessionDir && sessionId) {
       id: `a${i}`,
       parentId: i === 1 ? "u1" : `a${i - 1}`,
       timestamp: now,
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: `fake answer ${i}` }],
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: { total: 0 },
-          totalTokens: 2,
-        },
-        model: "fake/model",
-      },
+      message: messageEnd(i),
     });
   }
   mkdirSync(sessionDir, { recursive: true });
@@ -81,24 +98,9 @@ if (writeSession && sessionDir && sessionId) {
 out({ type: "agent_start" });
 for (let i = 1; i <= turns; i++) {
   out({ type: "turn_start", turnIndex: i - 1 });
-  await new Promise((r) => setTimeout(r, 10));
-  out({
-    type: "message_end",
-    message: {
-      role: "assistant",
-      content: [{ type: "text", text: `fake answer ${i}` }],
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cost: { total: 0 },
-        totalTokens: 2,
-      },
-      model: "fake/model",
-    },
-  });
-  await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, turnDelay));
+  out({ type: "message_end", message: messageEnd(i) });
+  await new Promise((r) => setTimeout(r, turnDelay));
 }
 out({ type: "agent_end", messages: [] });
 if (exitAfter) process.exit(0);

@@ -142,4 +142,34 @@ if (forkMod.isTrellisAgent(mimicProjectDir, "trellis-missing"))
   fail("missing agent resolved as a trellis agent");
 ok("missing agent does not resolve");
 
+// ── 3. Trust gating + agent-name validation (TPE-001/002) ──────────────
+writeFileSync(
+  join(mimicProjectDir, ".pi", "agents", "trellis-project-only.md"),
+  "---\nmodel: project-only\n---\nProject-only body",
+);
+if (forkMod.isTrellisAgent(mimicProjectDir, "trellis-project-only", false))
+  fail("untrusted project resolved a project-tier-only agent");
+ok("untrusted project cannot resolve project-tier agents");
+if (!forkMod.isTrellisAgent(mimicProjectDir, "trellis-project-only", true))
+  fail("trusted project did not resolve its project-tier agent");
+if (
+  forkMod
+    .readTrellisAgent(mimicProjectDir, "trellis-shared", false)
+    .includes("Project shared body")
+)
+  fail("untrusted project still resolved the project-tier override");
+if (
+  !forkMod
+    .readTrellisAgent(mimicProjectDir, "trellis-shared", false)
+    .includes("Global shared body")
+)
+  fail("untrusted project did not fall back to the global tier");
+ok("untrusted project falls back to the global tier (project no longer wins)");
+
+if (forkMod.agentNameError("../escape") === null)
+  fail("traversal agent name was accepted");
+if (forkMod.agentNameError("trellis-implement") !== null)
+  fail("valid agent name was rejected");
+ok("agent-name validation rejects traversal names");
+
 console.log("composed-load: all assertions passed");
