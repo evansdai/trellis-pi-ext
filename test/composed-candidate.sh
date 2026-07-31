@@ -281,7 +281,7 @@ BEFORE="$(sha256sum "$MIMIC/.pi/settings.json" | cut -d' ' -f1)"
 # official non-interactive batch flag `--skip-all` (same decisions: proceed=yes,
 # every conflict=skip); the evidence records which mode actually ran.
 GATE_E_MODE="pty"
-python3 - "$MIMIC" "$TRELLIS_CLI" <<'PY' > "$EVIDENCE_DIR/E1-trellis-update.log" 2>&1
+python3 - "$MIMIC" "$TRELLIS_CLI" <<'PY' > "$EVIDENCE_DIR/E1-pty-attempt.log" 2>&1
 import os
 import pty
 import re
