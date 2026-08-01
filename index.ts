@@ -1969,17 +1969,31 @@ export function renderHandoff(entries: unknown[], maxTokens: number): string {
       break; // newest real summary found
     }
   }
-  const messages: string[] = [];
-  for (let i = entries.length - 1; i >= 0 && messages.length < MEM_MAX_MESSAGES; i--) {
+  // Newest USER message is the freshest statement of intent — guarantee it even
+  // when an assistant-heavy tail would otherwise fill the budget first.
+  const collected: Array<{ pos: number; line: string }> = [];
+  let newestUser: { pos: number; line: string } | undefined;
+  for (let i = entries.length - 1; i >= 0; i--) {
     const entry = isObj(entries[i]) ? (entries[i] as MemBranchEntry) : null;
     if (!entry || entry.type !== "message") continue;
     const role = entry.message?.role;
-    const text = role === "user" || role === "assistant" ? memText(entry.message?.content).trim() : "";
+    if (role !== "user" && role !== "assistant") continue;
+    const text = memText(entry.message?.content).trim();
     if (!text) continue;
-    const label = role === "user" ? "[User]" : "[Assistant]";
-    messages.unshift(`${label}: ${text.length > MEM_MAX_MESSAGE_CHARS ? text.slice(0, MEM_MAX_MESSAGE_CHARS - 1) + "…" : text}`);
+    const line = `${role === "user" ? "[User]" : "[Assistant]"}: ${text.length > MEM_MAX_MESSAGE_CHARS ? text.slice(0, MEM_MAX_MESSAGE_CHARS - 1) + "…" : text}`;
+    if (role === "user" && !newestUser) newestUser = { pos: i, line };
+    if (collected.length < MEM_MAX_MESSAGES) collected.push({ pos: i, line });
   }
-  parts.push(...messages);
+  if (newestUser && !collected.some((c) => c.line === newestUser!.line)) {
+    const oldest = collected[collected.length - 1]; // smallest pos (newest-first push)
+    if (oldest && oldest.line.startsWith("[Assistant]")) {
+      collected[collected.length - 1] = newestUser;
+    } else if (collected.length < MEM_MAX_MESSAGES) {
+      collected.push(newestUser);
+    }
+  }
+  collected.sort((a, b) => a.pos - b.pos); // oldest-first: budget loop drops shift() = oldest
+  parts.push(...collected.map((c) => c.line));
   if (parts.length === 0) return "";
   const maxChars = maxTokens * MEM_CHARS_PER_TOKEN;
   let totalChars = parts.reduce((sum, p) => sum + p.length, 0);

@@ -136,6 +136,15 @@ test("renderHandoff: strictly caps a single oversized remaining part", () => {
   assert.ok(payload.length <= 40);
 });
 
+test("renderHandoff: guarantees newest user message under an assistant-heavy tail", () => {
+  const tail = [
+    ...Array.from({ length: 8 }, (_, k) => messageEntry("assistant", `narration ${k}`)),
+    messageEntry("user", "restarted. continue"),
+  ];
+  const block = renderHandoff(tail, 300);
+  assert.ok(block.includes("[User]: restarted. continue"));
+});
+
 test("renderHandoff: empty when nothing to include", () => {
   assert.equal(renderHandoff([], 300), "");
   assert.equal(renderHandoff([compactionEntry("[OpenAI native compaction checkpoint]")], 300), "");
