@@ -92,6 +92,7 @@ writeFileSync(
 );
 process.chdir(yieldProject);
 const rec1 = recordingPi();
+forkMod.default(rec1.pi);
 if (rec1.tools.length !== 0)
   fail(`fork registered tools in a generated-ext project: ${rec1.tools.map((t) => t.name).join(",")}`);
 if (rec1.shortcuts.length !== 0)
@@ -113,6 +114,7 @@ const activeProject = join(work, "active-project");
 mkdirSync(join(activeProject, ".pi"), { recursive: true });
 process.chdir(activeProject);
 const rec2 = recordingPi();
+forkMod.default(rec2.pi);
 const subagents = rec2.tools.filter((t) => t.name === "trellis_subagent").length;
 if (subagents !== 1)
   fail(`expected exactly one trellis_subagent in an active project, got ${subagents}`);
