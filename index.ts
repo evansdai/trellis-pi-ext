@@ -1365,6 +1365,34 @@ function findRoot(start: string): string {
     c = p;
   }
 }
+
+// True when <root>/.pi/settings.json still loads the generated Trellis
+// extension (./extensions/trellis/index.ts). The fork is a global pi package
+// and must yield to the generated ext in such projects, otherwise pi reports
+// a "Tool 'trellis_subagent' conflicts with <generated ext>" startup error.
+// Missing/unparseable settings.json or unrelated entries -> false (fork
+// active). Matches `./extensions/trellis/index.ts`, `extensions/trellis/index.ts`,
+// and absolute forms.
+export function projectLoadsGeneratedExt(root: string): boolean {
+  const settingsPath = join(root, ".pi", "settings.json");
+  if (!existsSync(settingsPath)) return false;
+  let settings: { extensions?: unknown };
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      extensions?: unknown;
+    };
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(settings.extensions)) return false;
+  return settings.extensions.some((entry) => {
+    if (typeof entry !== "string") return false;
+    const resolved = join(root, ".pi", entry.replace(/^\.\//, ""))
+      .split(sep)
+      .join("/");
+    return resolved.endsWith("extensions/trellis/index.ts");
+  });
+}
 function splitFM(c: string) {
   const m = c.replace(/^\uFEFF/, "").match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   return m
@@ -2260,6 +2288,12 @@ export default function trellisExtension(pi: {
 }): void {
   if (process.env.TRELLIS_SUBAGENT_CHILD === "1") return;
   const root = findRoot(process.cwd());
+  if (projectLoadsGeneratedExt(root)) {
+    console.warn(
+      "[trellis-pi-ext] inactive in this project: .pi/settings.json loads the generated trellis extension (./extensions/trellis/index.ts). Remove that entry to activate @evansdai/trellis-pi-ext (fleet producer, max_turns, global agents).",
+    );
+    return;
+  }
   reconcileFleetRuns(); // flag stale running records from a previous pi process
   if (pi.events) {
     const childIds = communityChildSessionIds();

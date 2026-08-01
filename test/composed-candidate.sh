@@ -23,6 +23,10 @@
 #      project is preserved (never silently re-enabled).
 #   F. removal gate: uninstalling the fork leaves fleet-core AND
 #      @gotgenes/pi-subagents installed and functional.
+#   G. yield guard: in a project whose .pi/settings.json loads the generated
+#      trellis ext, the fork registers NOTHING and the generated ext is the
+#      sole trellis_subagent provider (exactly one total); without the entry
+#      the fork registers normally.
 #
 # The loopback HTTP server only serves git's prepared dumb-HTTP files. No live
 # profile, no external network.
@@ -229,6 +233,14 @@ run "$EVIDENCE_DIR/B1-composed-load.log" env PI_FLEET_RUNS_DIR="$WORK/gateB-runs
   node "$FORK_DIR/test/composed-load.mjs" "$FORK_DIR" "$FLEET_DIR" "$GOTGENES" "$GLOBAL_AGENTS" "$MIMIC_PROJECT"
 assert_file "composed-load: all assertions passed" "$EVIDENCE_DIR/B1-composed-load.log"
 pass "Gate B: composed jiti load — one trellis_subagent, one fleet, no ctrl+s, two-tier agents"
+
+# ── Gate G: yield guard — fork yields when the project loads the generated ext ─
+GENERATED_EXT="$TRELLIS_PROJECT_DIR/.pi/extensions/trellis/index.ts"
+[ -f "$GENERATED_EXT" ] || fail "generated trellis ext not found at $GENERATED_EXT (set TRELLIS_PROJECT_DIR)"
+run "$EVIDENCE_DIR/G1-yield-gate.log" env PI_FLEET_RUNS_DIR="$WORK/gateG-runs" \
+  node "$FORK_DIR/test/yield-gate.mjs" "$FORK_DIR" "$GENERATED_EXT" "$WORK/gateG"
+assert_file "yield-gate: all assertions passed" "$EVIDENCE_DIR/G1-yield-gate.log"
+pass "Gate G: fork yields in a generated-ext project (exactly one trellis_subagent total); active without the entry"
 
 # ── Gate D: fleet producer end-to-end (scripted child through real fork) ─
 FLEET_RUNS="$WORK/fleet-runs"
