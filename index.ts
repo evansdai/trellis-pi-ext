@@ -1374,6 +1374,10 @@ function findRoot(start: string): string {
 // active). Matches `./extensions/trellis/index.ts`, `extensions/trellis/index.ts`,
 // and absolute forms.
 export function projectLoadsGeneratedExt(root: string): boolean {
+  // Primary signal: pi AUTO-DISCOVERS <root>/.pi/extensions/** (subdirectory
+  // with index.ts) regardless of settings.json, so the generated ext file
+  // itself being present means it will load and the fork must yield.
+  if (existsSync(join(root, ".pi", "extensions", "trellis", "index.ts"))) return true;
   const settingsPath = join(root, ".pi", "settings.json");
   if (!existsSync(settingsPath)) return false;
   let settings: { extensions?: unknown };

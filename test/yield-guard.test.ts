@@ -134,3 +134,35 @@ test("yield guard: no .pi/settings.json -> fork registers normally", () => {
     process.chdir(prevCwd);
   }
 });
+
+// ── Auto-discovery: pi loads <root>/.pi/extensions/** regardless of
+//    settings.json, so the generated ext FILE itself must trigger the yield.
+test("projectLoadsGeneratedExt: generated ext FILE present (auto-discovery), clean settings -> true", () => {
+  const dir = makeProject(JSON.stringify({ enableSkillCommands: true }));
+  mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "extensions", "trellis", "index.ts"), "export default function(){}");
+  assert.equal(projectLoadsGeneratedExt(dir), true);
+});
+
+test("projectLoadsGeneratedExt: generated ext FILE present, NO settings.json -> true", () => {
+  const dir = makeProject(null);
+  mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "extensions", "trellis", "index.ts"), "export default function(){}");
+  assert.equal(projectLoadsGeneratedExt(dir), true);
+});
+
+test("yield guard: generated ext FILE present but clean settings -> registers NOTHING", () => {
+  const dir = makeProject(JSON.stringify({ enableSkillCommands: true, prompts: ["./prompts"] }));
+  mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "extensions", "trellis", "index.ts"), "export default function(){}");
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    const rec = recordingPi();
+    assert.equal(rec.tools.length, 0, "no tools");
+    assert.equal(rec.shortcuts.length, 0, "no shortcuts");
+    assert.deepEqual(Object.keys(rec.events), [], "no events/bus subscription");
+  } finally {
+    process.chdir(prevCwd);
+  }
+});

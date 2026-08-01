@@ -114,17 +114,19 @@ duplicate the `trellis_subagent` tool). The generated file may remain on disk
 ## Conflict with the generated Trellis extension
 
 The fork is a **global** pi settings package, so it loads in every project. A
-project that still loads the generated extension from its own
-`.pi/settings.json` (`"./extensions/trellis/index.ts"` in `extensions`) keeps
-**stock Trellis behavior**: the fork detects that entry at startup and yields —
-it registers nothing (no tool, no shortcut, no events, no bus subscription)
-and prints a one-time warning. This avoids pi's "Tool 'trellis_subagent'
-conflicts" startup error when both would register the same tool.
+project that still has the generated extension file at
+`.pi/extensions/trellis/index.ts` keeps **stock Trellis behavior**: pi
+auto-discovers `<cwd>/.pi/extensions/**` regardless of `.pi/settings.json`, so
+the fork detects that file at startup and yields — it registers nothing (no
+tool, no shortcut, no events, no bus subscription) and prints a one-time
+warning. This avoids pi's "Tool 'trellis_subagent' conflicts" startup error
+when both would register the same tool.
 
-To activate the fork in such a project, remove the generated-ext entry from
-its `.pi/settings.json` (`extensions: ["./extensions/trellis/index.ts"]`),
-keeping the fork package loaded globally. This repository's own `.pi/`
-already uses the fork (no generated-ext entry), so the fork is active here.
+To activate the fork in such a project, delete the generated extension file
+`.pi/extensions/trellis/index.ts` (pi auto-discovers it; the `.pi/settings.json`
+entry is not what loads it), keeping the fork package loaded globally. This
+repository's own `.pi/extensions/trellis/index.ts` is deleted and the fork is
+the sole provider here.
 
 ## Rollback
 

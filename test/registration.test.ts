@@ -10,6 +10,15 @@ const work = mkdtempSync(join(tmpdir(), "trellis-ext-register-"));
 process.env.PI_FLEET_RUNS_DIR = join(work, "fleet");
 process.env.PI_CODING_AGENT_DIR = join(work, "agent");
 delete process.env.TRELLIS_SUBAGENT_CHILD;
+// Run from an isolated cwd so findRoot() does not walk up into the live
+// pi-config repo (where the generated trellis ext would make the fork yield).
+const isolatedCwd = mkdtempSync(join(tmpdir(), "trellis-ext-register-cwd-"));
+process.chdir(isolatedCwd);
+
+after(() => {
+  rmSync(isolatedCwd, { recursive: true, force: true });
+  rmSync(work, { recursive: true, force: true });
+});
 
 after(() => rmSync(work, { recursive: true, force: true }));
 
