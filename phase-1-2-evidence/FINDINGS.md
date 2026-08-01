@@ -1,13 +1,12 @@
 # Phase 1–2 evidence — `@evansdai/trellis-pi-ext` fork
 
 **Evidence date:** `[AS OF: 2026-08-01]` (session clock); Pi 0.83.0 / Trellis 0.6.11.
-**Fork commit:** `179dfb3` (follow-up-2 code+gate HEAD: NEW-001..004
-resolutions; the TPE-001..012 era gated code HEAD was `36524bb`, final docs
-HEAD `ac7d871`; history: `da2f5e3` → `bdf4628` → `ba0a6fe` → `a5c6076` →
-`36524bb` → `ac7d871` → `b5b5f7e` → `179dfb3`; the docs commit carrying
-this table is the repository HEAD at the time of reading (`git log`); the
-working-copy history was recreated cleanly after an index accident — see note
-below).
+**Fork commit:** `edc9328` (trellis-check code+gate HEAD: TCF-001..005
+resolutions; final docs HEAD = this commit; history: `da2f5e3` → `bdf4628` →
+`ba0a6fe` → `a5c6076` → `36524bb` → `ac7d871` → `b5b5f7e` → `179dfb3` →
+`2c4c7b3` → `edc9328` → this commit; the docs commit carrying this table is
+the repository HEAD at the time of reading (`git log`); the working-copy
+history was recreated cleanly after an index accident — see note below).
 **Logs:** `phase-1-2-evidence/logs/` (gitignored; retained on this machine).
 
 ## Verified facts
@@ -100,17 +99,35 @@ clobbered (TPE-005, NEW-003).
 | A local-path install | PASS | install/list/headless-start (stale-record reconcile marker proves the extension loaded)/remove, exactly one source |
 | A loopback immutable Git install | PASS | detached HEAD at fork commit, list, start, remove |
 | B composed jiti load (fork + fleet-core + gotgenes 19.2.1) | PASS | exactly one `trellis_subagent`; exactly one `fleet` command (+ pi-subagents' own `subagents:settings`/`subagents:sessions`); no `ctrl+s` (only `alt+o`); `before_agent_start` present; global-only agent resolves from a foreign project; project file overrides |
-| C max_turns gate | PASS | old generated ext: 0 `maxTurns` symbols, 0 `--session-id` flags, 0 fleet-record writer (fail-before); fork's focused loop test passes (abort at N+2, unlimited for 0/unset) |
+| C max_turns gate | PASS | **behavioral (TCF-002):** `old-ext-max-turns-gate.mjs` drives the pre-fork ext's own `runPi` (temp copy, appended export) with the scripted 6-turn child → `old_ext_bounded=no turns=6 status=succeeded`; fork's `runPi` under the same stream with `max_turns: 2` → `fork_abort=yes turns=4 status=cancelled` (abort at N+2); static symbols (0 `maxTurns`, 0 `--session-id`) recorded as context; focused max_turns suite passes; old-ext half skippable (`TRELLIS_OLD_EXT` missing) |
 | D fleet producer | PASS | scripted run → v1 record with real `sessionFile`; `view-session.mjs --preview` renders it; `pi-fleet --list` roster shows the run; stale record reconciled at startup |
 | E trellis update | PASS | user-modified `.pi/settings.json` classified "Modified by you", preserved byte-identical; update ran to completion with exit 0 (`--skip-all` fallback; see TPE-009 note — the sandbox denies PTY allocation, so the interactive PTY driver could not run here) |
-| F removal | PASS | uninstalling the fork leaves fleet-core installed + headless start clean |
+| F removal | PASS | **TCF-001:** removal profile = fleet-core + fork + `@gotgenes/pi-subagents` 19.2.1 (local pinned npm dir; offline npm cache has no tarball — `F1b`); pre-removal composed jiti load (`F3b`) passes all Gate B assertions; after fork removal: headless start clean, removal-mode jiti load (`F5b`: no `trellis_subagent` leftover, `get_subagent_result`/`steer_subagent` present, `subagents:settings`+`subagents:sessions` registered, exactly one `fleet`, no `ctrl+s`), `pi list` shows fleet + gotgenes, fork gone; `F7-findings.txt` records `gotgenes_version=19.2.1` |
 
-Unit suite: 53/53 (`npm run check`: typecheck + tests; 25/25 pre-follow-up).
-Every new regression fails on the pre-fix code path where feasible (verified
-by running the new suites against `bdf4628:index.ts`: TPE-001 write-path,
-TPE-003 stopReason, TPE-004 no-fabrication, and TPE-005 reconcile regressions
-all fail on the old code; agent-discovery file fails to load because the old
-code lacks `agentNameError`/`sanitizeFleetId`).
+## Trellis-check follow-up (TCF-001…TCF-005) — resolutions
+
+All five gate-quality findings from the trellis-check review of `2c4c7b3`
+were fixed in `edc9328`. Resolution table (finding → fix → verification):
+
+| # | Finding | Fix | Verification |
+|---|---|---|---|
+| TCF-001 | Gate F verified only fleet-core after fork removal; pi-subagents not in the removal profile | removal profile installs `@gotgenes/pi-subagents` 19.2.1 (local-path install of the pinned npm dir — the offline npm cache has no tarball, so the npm spec cannot install; the source IS the 19.2.1 npm install, version recorded in `F7-findings.txt`); pre-removal composed jiti load (all three); post-removal removal-mode jiti load (`composed-load.mjs` `-` mode: no `trellis_subagent` leftover, pi-subagents tools + `subagents:settings`/`subagents:sessions` present, exactly one `fleet`, no `ctrl+s`); `pi list` asserts all three sources; headless starts before and after removal | Gate F re-run PASS; evidence `F1b`/`F3b`/`F5b`/`F6`/`F7` |
+| TCF-002 | Gate C was a static symbol grep (fail-before not behavioral) | new `test/old-ext-max-turns-gate.mjs`: temp copy of the pre-fork generated ext with an appended `export { runPi, newRun, resolveRunCfg }` (module-private helpers; hoisted declarations — no behavior change), drives its `runPi` with the scripted 6-turn fake child (exits 0) → completes all turns (`old_ext_bounded=no turns=6 status=succeeded`); the fork's `runPi` under the SAME stream with `max_turns: 2` hard-aborts at 2+GRACE_TURNS=4 (`fork_abort=yes turns=4 status=cancelled`); static symbol counts retained as context only; old-ext half skippable when `TRELLIS_OLD_EXT` is missing (no longer a hard preflight — the public repo's gate runs from a clean checkout); focused `max-turns-loop.test.ts` still runs in the gate | Gate C re-run PASS; `C1-old-ext-max-turns.log` shows both halves; `none`-mode probe passes; harness verified independently against the live old ext |
+| TCF-003 | Gate E copied from hard-coded `$HOME/.pi/.trellis/…` with no override, no preflight, and no `set -e` (silent `cp` failures) | `TRELLIS_PROJECT_DIR` override (default `$HOME/.pi`); explicit preflight of `config.yaml`/`workflow.md`/`.template-hashes.json` with clear failure messages; every `cp` guarded with `|| fail` | Gate E re-run PASS (default layout); override probe: preflight + guarded copies pass against a temp source dir; `bash -n` clean |
+| TCF-004 | README dev-dep list omitted `jiti` | README dev-only list now reads `typescript`, `@types/node`, `tsx`, `jiti` (isolated-module test harness), `@earendil-works/pi-coding-agent` (type-only) | committed text matches `package.json` devDependencies |
+| TCF-005 | inherited CommonJS `require("@earendil-works/pi-tui")` conflicts with the repo TS guideline | recorded as an **approved compatibility exception**: code comment at `piTui()` in `index.ts` (inherited verbatim from the trellis template; pi-tui is CommonJS and the synchronous require is required for the lazy-load pattern; do not refactor to a top-level ESM import) + README dependency note; **no refactor** (explicitly out of scope) | committed text; extension still loads under jiti and headless pi (Gates B/D/F) |
+
+Unit suite remains 53/53 (`npm run check`: typecheck + tests; the gate harness
+is `.mjs`, exercised by `composed-candidate.sh`, not the tsx suite).
+
+Every follow-up regression fails on the pre-fix code path where feasible
+(verified by running the new suites against `bdf4628:index.ts`: TPE-001
+write-path, TPE-003 stopReason, TPE-004 no-fabrication, and TPE-005 reconcile
+regressions all fail on the old code; agent-discovery file fails to load
+because the old code lacks `agentNameError`/`sanitizeFleetId`; NEW-001
+retry-stream probes fail on the pre-fix path). Gate C's fail-before is now
+behavioral at the gate level itself: the pre-fork generated ext completes all
+6 scripted turns (`old_ext_bounded=no`) where the fork hard-aborts at N+2.
 
 ## Oracle follow-up (TPE-001…TPE-012) — resolutions
 
