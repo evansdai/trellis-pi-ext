@@ -26,8 +26,14 @@ as disposable-template patches:
 - **Zero runtime dependencies.** The extension is self-contained TypeScript;
   pi loads `index.ts` directly. `@earendil-works/pi-tui` is lazily required
   only for width-aware text truncation and degrades gracefully when absent.
+  The `require()` call is an **approved compatibility exception** inherited
+  from the trellis template (see `piTui()` in `index.ts`): pi-tui is a
+  CommonJS module and the synchronous `require` is required for the lazy-load
+  pattern; it is intentionally **not** refactored to a top-level ESM import in
+  this fork.
 - **Dev-only dependencies** (typecheck/tests): `typescript`, `@types/node`,
-  `tsx`, `@earendil-works/pi-coding-agent` (type-only).
+  `tsx`, `jiti` (isolated-module test harness), `@earendil-works/pi-coding-agent`
+  (type-only).
 
 ## Supported versions
 

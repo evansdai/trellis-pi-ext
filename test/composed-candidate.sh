@@ -11,14 +11,18 @@
 #      recording fake pi: exactly one trellis_subagent, one fleet command, no
 #      ctrl+s, before_agent_start present; two-tier agent resolution from a
 #      mimic project.
-#   C. max_turns gate: the old generated ext lacks maxTurns/session-id routing
-#      (fail-before evidence); the fork's focused test passes.
+#   C. max_turns gate: behavioral fail-before — drive the OLD generated ext's
+#      runPi with the scripted 6-turn child and assert it does NOT bound the
+#      run, while the fork's runPi under the same stream hard-aborts at N+2;
+#      the old-ext half is skippable (TRELLIS_OLD_EXT missing) so the gate
+#      runs from a clean public checkout.
 #   D. fleet producer gate: scripted run writes a v1 record with a real
 #      sessionFile; view-session.mjs renders it; the pi-fleet roster lists it;
 #      reconcile flags a stale running record.
 #   E. trellis update gate: a user-modified .pi/settings.json in a mimic
 #      project is preserved (never silently re-enabled).
-#   F. removal gate: uninstalling the fork leaves fleet-core functional.
+#   F. removal gate: uninstalling the fork leaves fleet-core AND
+#      @gotgenes/pi-subagents installed and functional.
 #
 # The loopback HTTP server only serves git's prepared dumb-HTTP files. No live
 # profile, no external network.
@@ -33,6 +37,9 @@ FLEET_DIR="${PI_FLEET_PACKAGE_DIR:-$HOME/.pi/.fleet-core}"
 OLD_EXT="${TRELLIS_OLD_EXT:-$HOME/.pi/.pi/extensions/trellis/index.ts}"
 GOTGENES="${GOTGENES_SUBAGENTS_DIR:-$HOME/.pi/agent/npm/node_modules/@gotgenes/pi-subagents}"
 TRELLIS_CLI="${TRELLIS_CLI_BIN:-$HOME/.pi/agent/npm/node_modules/.bin/trellis}"
+# TCF-003: Gate E source project is overridable (default = the live pi-config
+# home) so the gate is not coupled to this machine's layout.
+TRELLIS_PROJECT_DIR="${TRELLIS_PROJECT_DIR:-$HOME/.pi}"
 TSX="$FORK_DIR/node_modules/.bin/tsx"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/trellis-pi-ext-composed.XXXXXX")"
@@ -71,9 +78,20 @@ done
 [ -f "$FORK_DIR/package.json" ] || fail "fork package not found at $FORK_DIR"
 [ -f "$FLEET_DIR/package.json" ] || fail "fleet-core package not found at $FLEET_DIR (set PI_FLEET_PACKAGE_DIR)"
 [ -f "$FLEET_DIR/fleet-record-v1.mjs" ] || fail "fleet-core validator not found at $FLEET_DIR/fleet-record-v1.mjs"
-[ -f "$OLD_EXT" ] || fail "old generated trellis ext not found at $OLD_EXT (set TRELLIS_OLD_EXT)"
+# TCF-002: the pre-fork ext is fail-before evidence, not a hard prerequisite —
+# Gate C skips its old-ext half with a clear message when it is absent.
+if [ -f "$OLD_EXT" ]; then
+  : # old-ext half of Gate C is enabled
+else
+  printf 'note: TRELLIS_OLD_EXT not found (%s); Gate C runs the fork half only\n' "$OLD_EXT" >&2
+fi
 [ -d "$GOTGENES/src" ] || fail "gotgenes pi-subagents source not found at $GOTGENES (set GOTGENES_SUBAGENTS_DIR)"
 [ -x "$TRELLIS_CLI" ] || fail "trellis CLI not found at $TRELLIS_CLI (set TRELLIS_CLI_BIN)"
+# TCF-003: preflight every Gate E source file explicitly so a missing layout
+# fails loudly instead of silently producing a broken mimic.
+[ -f "$TRELLIS_PROJECT_DIR/.trellis/config.yaml" ] || fail "trellis config.yaml not found at $TRELLIS_PROJECT_DIR/.trellis/config.yaml (set TRELLIS_PROJECT_DIR)"
+[ -f "$TRELLIS_PROJECT_DIR/.trellis/workflow.md" ] || fail "trellis workflow.md not found at $TRELLIS_PROJECT_DIR/.trellis/workflow.md (set TRELLIS_PROJECT_DIR)"
+[ -f "$TRELLIS_PROJECT_DIR/.trellis/.template-hashes.json" ] || fail "trellis .template-hashes.json not found at $TRELLIS_PROJECT_DIR/.trellis/.template-hashes.json (set TRELLIS_PROJECT_DIR)"
 [ -x "$TSX" ] || fail "tsx not installed in the fork repo (npm install first)"
 [ -n "$(git -C "$FORK_DIR" status --porcelain 2>/dev/null)" ] && fail "fork worktree is dirty; commit or stash before proving"
 [ -n "$(git -C "$FLEET_DIR" status --porcelain 2>/dev/null)" ] && fail "fleet-core worktree is dirty; commit or stash before proving"
@@ -183,19 +201,25 @@ grep -Fq "Failed to load extension" "$EVIDENCE_DIR/A8-git-start.log" && fail "ex
 run "$EVIDENCE_DIR/A9-git-remove.log" env PI_CODING_AGENT_DIR="$WORK/git-profile" PI_OFFLINE=1 pi remove "$GIT_SOURCE" --no-approve
 pass "Gate A (loopback git): immutable install/list/detached-HEAD/headless-start/remove"
 
-# ── Gate C: max_turns fail-before evidence on the old generated ext ─────
-{
-  printf 'old_ext=%s\n' "$OLD_EXT"
-  printf 'fork_commit=%s\n' "$FORK_COMMIT"
-  printf 'maxTurns_symbols_in_old_ext=%s\n' "$(grep -c "maxTurns" "$OLD_EXT" || true)"
-  printf 'session_id_flags_in_old_ext=%s\n' "$(grep -c -- "--session-id" "$OLD_EXT" || true)"
-  printf 'fleet_record_writer_in_old_ext=%s\n' "$(grep -c "writeTrellisFleetRecord" "$OLD_EXT" || true)"
-} > "$EVIDENCE_DIR/C1-old-ext-gate.txt"
-grep -q "maxTurns_symbols_in_old_ext=0" "$EVIDENCE_DIR/C1-old-ext-gate.txt" || fail "old ext unexpectedly contains maxTurns handling"
-grep -q "session_id_flags_in_old_ext=0" "$EVIDENCE_DIR/C1-old-ext-gate.txt" || fail "old ext unexpectedly contains session-id routing"
+# ── Gate C: max_turns fail-before — behavioral (TCF-002) ───────────────
+# The old-ext half drives the PRE-FORK ext's own runPi (temp copy with an
+# appended export) with the scripted 6-turn child and asserts it does NOT
+# bound the run; the fork half asserts a hard abort at N+2 under the same
+# stream. The old-ext half is skippable when the pre-fork file is absent.
+OLD_EXT_ARG="$OLD_EXT"
+if [ ! -f "$OLD_EXT" ]; then OLD_EXT_ARG="none"; fi
+run "$EVIDENCE_DIR/C1-old-ext-max-turns.log" env PI_DIR="$PI_DIR" \
+  node "$FORK_DIR/test/old-ext-max-turns-gate.mjs" "$OLD_EXT_ARG" "$FORK_DIR" "$WORK/old-ext-gate"
+assert_file "fork_abort=yes" "$EVIDENCE_DIR/C1-old-ext-max-turns.log"
+if [ "$OLD_EXT_ARG" = "none" ]; then
+  C1_RESULT="old-ext half SKIPPED ($OLD_EXT missing; set TRELLIS_OLD_EXT to enable); fork aborts at N+2"
+else
+  assert_file "old_ext_bounded=no" "$EVIDENCE_DIR/C1-old-ext-max-turns.log"
+  C1_RESULT="old ext unbounded under the same stream; fork aborts at N+2"
+fi
 run "$EVIDENCE_DIR/C2-fork-max-turns-test.log" env -C "$FORK_DIR" "$TSX" --test test/max-turns-loop.test.ts
 grep -Fq "pass " "$EVIDENCE_DIR/C2-fork-max-turns-test.log" || fail "fork max_turns test did not pass"
-pass "Gate C: old ext lacks max_turns/session-id (fail-before); fork focused test passes"
+pass "Gate C: $C1_RESULT; focused max_turns suite passes"
 
 # ── Gate B: composed jiti load (fork + fleet-core + pi-subagents) ───────
 GLOBAL_AGENTS="$WORK/global-agents"
@@ -261,11 +285,16 @@ assert_reconciled "$FLEET_RUNS"
 pass "Gate D: v1 record with real sessionFile, view-session renders it, roster lists it, reconcile flags stale"
 
 # ── Gate E: trellis update preserves a user-modified .pi/settings.json ──
+# TCF-003: sources come from $TRELLIS_PROJECT_DIR (overridable, default
+# $HOME/.pi); every copy is guarded so a missing/denied source fails loudly.
 MIMIC="$WORK/trellis-mimic"
 mkdir -p "$MIMIC/.trellis" "$MIMIC/.pi"
-cp "$HOME/.pi/.trellis/config.yaml" "$MIMIC/.trellis/config.yaml"
-cp "$HOME/.pi/.trellis/workflow.md" "$MIMIC/.trellis/workflow.md"
-cp "$HOME/.pi/.trellis/.template-hashes.json" "$MIMIC/.trellis/.template-hashes.json"
+cp "$TRELLIS_PROJECT_DIR/.trellis/config.yaml" "$MIMIC/.trellis/config.yaml" \
+  || fail "copy of $TRELLIS_PROJECT_DIR/.trellis/config.yaml failed"
+cp "$TRELLIS_PROJECT_DIR/.trellis/workflow.md" "$MIMIC/.trellis/workflow.md" \
+  || fail "copy of $TRELLIS_PROJECT_DIR/.trellis/workflow.md failed"
+cp "$TRELLIS_PROJECT_DIR/.trellis/.template-hashes.json" "$MIMIC/.trellis/.template-hashes.json" \
+  || fail "copy of $TRELLIS_PROJECT_DIR/.trellis/.template-hashes.json failed"
 cat > "$MIMIC/.pi/settings.json" <<'JSON'
 {
   "enableSkillCommands": true,
@@ -387,22 +416,43 @@ grep -Fq '"extensions": []' "$MIMIC/.pi/settings.json" || fail "settings.json co
 } > "$EVIDENCE_DIR/E2-findings.txt"
 pass "Gate E: trellis update ($GATE_E_MODE, exit 0) preserved the user-modified settings.json"
 
-# ── Gate F: removal leaves fleet-core functional ────────────────────────
+# ── Gate F: removal leaves fleet-core AND pi-subagents functional ──────
+# TCF-001: the removal profile now also installs @gotgenes/pi-subagents
+# (19.2.1) and, after removing the fork, asserts pi-subagents still loads
+# (removal-mode jiti load + pi list) alongside fleet-core. Installed from the
+# local pinned npm dir (offline npm cache has no tarball; the source IS the
+# 19.2.1 npm install, recorded in F7-findings.txt).
 git clone -q --bare "$FLEET_DIR" "$WORK/www/user/pi-fleet.git"
 git -C "$WORK/www/user/pi-fleet.git" update-server-info
 FLEET_SOURCE="http://127.0.0.1:$PORT/user/pi-fleet.git@$FLEET_COMMIT"
 REMOVE_PROFILE="$WORK/remove-profile"
 run "$EVIDENCE_DIR/F1-install-fleet.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 GIT_TERMINAL_PROMPT=0 pi install "$FLEET_SOURCE" --no-approve
+run "$EVIDENCE_DIR/F1b-install-gotgenes.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 pi install "$GOTGENES" --no-approve
 run "$EVIDENCE_DIR/F2-install-fork.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 GIT_TERMINAL_PROMPT=0 pi install "$GIT_SOURCE" --no-approve
 run "$EVIDENCE_DIR/F3-start-composed.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 PI_FLEET_RUNS_DIR="$WORK/git-runs" pi --no-session --no-approve -p ''
 grep -Fq "Failed to load extension" "$EVIDENCE_DIR/F3-start-composed.log" && fail "composed start failed"
+# Pre-removal composed jiti load (fork + fleet-core + pi-subagents): same
+# assertions as Gate B, proving the removal profile's trio is well-formed.
+run "$EVIDENCE_DIR/F3b-composed-load.log" env PI_FLEET_RUNS_DIR="$WORK/gateB-runs" \
+  node "$FORK_DIR/test/composed-load.mjs" "$FORK_DIR" "$FLEET_DIR" "$GOTGENES" "$GLOBAL_AGENTS" "$MIMIC_PROJECT"
+assert_file "composed-load: all assertions passed" "$EVIDENCE_DIR/F3b-composed-load.log"
 run "$EVIDENCE_DIR/F4-remove-fork.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 pi remove "$GIT_SOURCE" --no-approve
 run "$EVIDENCE_DIR/F5-start-after-fork-remove.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 PI_FLEET_RUNS_DIR="$WORK/git-runs" pi --no-session --no-approve -p ''
-grep -Fq "Failed to load extension" "$EVIDENCE_DIR/F5-start-after-fork-remove.log" && fail "fleet-core broke after fork removal"
+grep -Fq "Failed to load extension" "$EVIDENCE_DIR/F5-start-after-fork-remove.log" && fail "fleet-core or pi-subagents broke after fork removal"
+# Removal-mode jiti load: pi-subagents tools/commands still register, fleet
+# intact, no leftover trellis_subagent tool, no ctrl+s.
+run "$EVIDENCE_DIR/F5b-removal-load.log" env PI_FLEET_RUNS_DIR="$WORK/gateB-runs" \
+  node "$FORK_DIR/test/composed-load.mjs" - "$FLEET_DIR" "$GOTGENES" "$GLOBAL_AGENTS" "$MIMIC_PROJECT"
+assert_file "composed-load: removal-mode assertions passed" "$EVIDENCE_DIR/F5b-removal-load.log"
 run "$EVIDENCE_DIR/F6-list-after.log" env PI_CODING_AGENT_DIR="$REMOVE_PROFILE" PI_OFFLINE=1 pi list --no-approve
 assert_file "$FLEET_SOURCE" "$EVIDENCE_DIR/F6-list-after.log"
+assert_file "$GOTGENES" "$EVIDENCE_DIR/F6-list-after.log"
 grep -Fq "$FORK_DIR" "$EVIDENCE_DIR/F6-list-after.log" && fail "fork still listed after removal"
-pass "Gate F: removing the fork leaves fleet-core installed and functional"
+{
+  printf 'gotgenes_version=%s\n' "$(node -e 'console.log(require(process.argv[1]+"/package.json").version)' "$GOTGENES")"
+  printf 'gotgenes_after_fork_remove=loaded (headless start + removal-mode jiti load + pi list)\n'
+} > "$EVIDENCE_DIR/F7-findings.txt"
+pass "Gate F: removing the fork leaves fleet-core + pi-subagents 19.2.1 installed and functional"
 
 {
   printf 'observedAt=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"

@@ -80,6 +80,11 @@ let _piTui: {
 function piTui() {
   if (!_piTui) {
     try {
+      // Approved compatibility exception (TCF-005): inherited verbatim from
+      // the trellis template. pi-tui is CommonJS; the synchronous require is
+      // required for this lazy-load pattern. Do NOT refactor to a top-level
+      // ESM import — keep the lazy require so truncation degrades gracefully
+      // when pi-tui is absent.
       _piTui = require("@earendil-works/pi-tui");
     } catch {
       _piTui = {};
