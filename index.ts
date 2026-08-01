@@ -1738,6 +1738,27 @@ export function globalAgentsDir(): string {
 }
 
 /**
+ * Resolve the pi-fleet launcher to an absolute path so ctrl+s works regardless of
+ * the spawned pane's PATH. Prefers the git-package install location
+ * (<agentDir>/git/github.com/evansdai/pi-fleet/bin/pi-fleet), which is portable across
+ * machines (macOS/Linux) as long as the .pi config is synced; falls back to a PATH
+ * lookup in this process, then to the bare "pi-fleet" name.
+ */
+function resolvePiFleet(): string {
+  const agentBase = str(process.env.PI_CODING_AGENT_DIR) ?? join(homedir(), ".pi", "agent");
+  const pkgBin = join(agentBase, "git", "github.com", "evansdai", "pi-fleet", "bin", "pi-fleet");
+  if (existsSync(pkgBin)) return pkgBin;
+  const pathVal = process.env.PATH ?? process.env.Path ?? "";
+  for (const entry of pathVal.split(delimiter)) {
+    const e = entry.trim();
+    if (!e) continue;
+    const c = join(e, "pi-fleet");
+    if (existsSync(c)) return c;
+  }
+  return "pi-fleet";
+}
+
+/**
  * Resolve `<agentsDir>/<name>.md` and assert the result stays directly inside
  * the agents dir. Returns null for invalid names or escaped paths — never a
  * path outside the intended directory.
@@ -2708,6 +2729,7 @@ export default function trellisExtension(pi: {
         return;
       }
       const launcher = (process.env.PI_FLEET_LAUNCHER ?? "auto").toLowerCase();
+      const fleet = resolvePiFleet();
       const useHerdr =
         launcher === "herdr" || (launcher === "auto" && !!process.env.HERDR_ENV);
       const useTmux = launcher === "tmux" || (launcher === "auto" && !!process.env.TMUX);
@@ -2742,19 +2764,19 @@ export default function trellisExtension(pi: {
           );
           return;
         }
-        spawn("herdr", ["pane", "run", paneId, "pi-fleet"], {
+        spawn("herdr", ["pane", "run", paneId, fleet], {
           stdio: "ignore",
           detached: true,
         }).unref();
         ctx.ui?.notify?.("Opened fleet roster in a side pane.", "info");
       } else if (useTmux) {
-        spawn("tmux", ["split-window", "-h", "pi-fleet"], {
+        spawn("tmux", ["split-window", "-h", fleet], {
           stdio: "ignore",
           detached: true,
         }).unref();
         ctx.ui?.notify?.("Opened fleet roster in a tmux side pane.", "info");
       } else {
-        ctx.ui?.notify?.(`Open a terminal pane and run: pi-fleet`, "info");
+        ctx.ui?.notify?.(`Open a terminal pane and run: ${fleet}`, "info");
       }
     },
   });
