@@ -31,6 +31,8 @@ interface PiToolResult {
 }
 interface PiExtensionContext {
   hasUI?: boolean;
+  /** Current run mode ("tui" | "rpc" | "json" | "print"); guards terminal-only UI. */
+  mode?: string;
   model?: {
     provider?: string;
     id?: string;
@@ -2695,6 +2697,67 @@ export default function trellisExtension(pi: {
     handler: async (ctx: PiExtensionContext) => toggleDetail(ctx),
   });
 
+  // Ctrl+S opens the fleet roster. Deployment policy (docs/fleet-external-pane-viewer.md):
+  // keybindings.json frees ctrl+s from app.session.toggleSort / app.models.save; the
+  // pi-fleet package keeps keybinding policy out of the fork, so the shortcut lives here.
+  pi.registerShortcut?.("ctrl+s", {
+    description: "Open fleet roster (pi-fleet)",
+    handler: (ctx: PiExtensionContext) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui?.notify?.("Fleet roster (pi-fleet) is available in interactive mode", "warning");
+        return;
+      }
+      const launcher = (process.env.PI_FLEET_LAUNCHER ?? "auto").toLowerCase();
+      const useHerdr =
+        launcher === "herdr" || (launcher === "auto" && !!process.env.HERDR_ENV);
+      const useTmux = launcher === "tmux" || (launcher === "auto" && !!process.env.TMUX);
+      if (useHerdr) {
+        const split = spawnSync(
+          "herdr",
+          ["pane", "split", "--current", "--direction", "right", "--no-focus"],
+          { encoding: "utf8" },
+        );
+        if (split.status !== 0) {
+          ctx.ui?.notify?.(`herdr pane split failed: ${split.stderr || split.stdout}`, "error");
+          return;
+        }
+        let paneId: string | undefined;
+        try {
+          const out = JSON.parse(split.stdout);
+          paneId =
+            out?.result?.pane?.pane_id ??
+            out?.result?.pane?.id ??
+            out?.pane?.pane_id ??
+            out?.pane?.id ??
+            out?.pane_id ??
+            out?.id ??
+            (Array.isArray(out?.result) ? out.result[0]?.pane_id : undefined);
+        } catch {
+          /* fall through */
+        }
+        if (!paneId) {
+          ctx.ui?.notify?.(
+            "Could not parse new pane id from `herdr pane split` output.",
+            "error",
+          );
+          return;
+        }
+        spawn("herdr", ["pane", "run", paneId, "pi-fleet"], {
+          stdio: "ignore",
+          detached: true,
+        }).unref();
+        ctx.ui?.notify?.("Opened fleet roster in a side pane.", "info");
+      } else if (useTmux) {
+        spawn("tmux", ["split-window", "-h", "pi-fleet"], {
+          stdio: "ignore",
+          detached: true,
+        }).unref();
+        ctx.ui?.notify?.("Opened fleet roster in a tmux side pane.", "info");
+      } else {
+        ctx.ui?.notify?.(`Open a terminal pane and run: pi-fleet`, "info");
+      }
+    },
+  });
   // Tool registration
   pi.registerTool?.({
     name: "trellis_subagent",
