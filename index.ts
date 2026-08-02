@@ -132,8 +132,8 @@ const ABORT_KILL_GRACE_MS = 1500;
 const GRACE_TURNS = 2;
 /** Stale "running" fleet records older than this are reconciled at startup. */
 const RECONCILE_MIN_AGE_MS = 60_000;
-/** FleetRunRecord v1 disk contract (see fleet-core fleet-record-v1.mjs). */
-const FLEET_RECORD_VERSION = 1;
+/** FleetRunRecord v2 disk contract: v1 fields + required non-empty parentSessionId; sessionFile nullable. */
+const FLEET_RECORD_VERSION = 2;
 const FLEET_RUN_DIR = "trellis";
 /**
  * Trellis agent names must be a basename only. The name is tool-controlled and
@@ -839,7 +839,7 @@ export function buildPiArgs(cfg: PiRunConfig, fleetId?: string): string[] {
   return args;
 }
 
-// ── Fleet producer (FleetRunRecord v1) ──────────────────────────────────
+// ── Fleet producer (FleetRunRecord v2) ──────────────────────────────────
 
 type FleetRecordStatus = "running" | "succeeded" | "failed" | "cancelled";
 
@@ -852,8 +852,11 @@ interface FleetRunRecord {
   startedAt: number;
   finishedAt: number | null;
   prompt: string;
-  sessionFile: string;
+  /** Null until the child transcript exists (v2: running records publish at spawn). */
+  sessionFile: string | null;
   error: string | null;
+  /** Invoking primary pi session (captured at tool execution; NOT contextKey()). */
+  parentSessionId: string;
 }
 
 /** Root fleet runs dir: $PI_FLEET_RUNS_DIR else ~/.pi/fleet/runs. */
@@ -905,7 +908,11 @@ export function resolveSessionFile(fleetId: string): string | null {
   return newest ? join(dir, newest.name) : null;
 }
 
-function fleetRecordFor(state: RunState, fleetId: string): FleetRunRecord {
+function fleetRecordFor(
+  state: RunState,
+  fleetId: string,
+  parentSessionId: string,
+): FleetRunRecord {
   return {
     version: FLEET_RECORD_VERSION,
     source: "trellis",
@@ -915,29 +922,36 @@ function fleetRecordFor(state: RunState, fleetId: string): FleetRunRecord {
     startedAt: state.startedAt ?? Date.now(),
     finishedAt: state.finishedAt ?? null,
     prompt: state.prompt.slice(0, 200),
-    sessionFile: resolveSessionFile(fleetId) ?? "",
+    sessionFile: resolveSessionFile(fleetId) ?? null,
     error: state.errorMessage ?? null,
+    parentSessionId,
   };
 }
 
 /**
  * Write the run record atomically (tmp + rename); best-effort, never breaks a
- * run. Skips silently when the fleet id is unsafe or no real transcript exists
- * yet (never fabricates a sessionFile). Running records carry a sidecar owner
- * marker (`<fleetId>.pid`, pid + process-birth identity) so reconcile can
- * distinguish a dead owner from another process's live run — including a pid
- * that was reused by an unrelated process (NEW-003); terminal writes remove it.
+ * run. v2 requires a non-empty parentSessionId — when it is unavailable the
+ * write is skipped entirely (best-effort producer; the run itself is
+ * unaffected, same swallow semantics as other best-effort failures).
+ * sessionFile stays null until a real transcript exists (never fabricates a
+ * path). Running records carry a sidecar owner marker (`<fleetId>.pid`, pid +
+ * process-birth identity) so reconcile can distinguish a dead owner from
+ * another process's live run — including a pid that was reused by an unrelated
+ * process (NEW-003); terminal writes remove it.
  */
-export function writeTrellisFleetRecord(state: RunState, fleetId: string): void {
+export function writeTrellisFleetRecord(
+  state: RunState,
+  fleetId: string,
+  parentSessionId?: string,
+): void {
   try {
     if (!FLEET_ID_RE.test(fleetId)) return; // never trust an unvalidated id
-    const file = resolveSessionFile(fleetId);
-    if (!file) return; // no real transcript yet — do not fabricate a path
+    if (!parentSessionId) return; // v2 contract: required, non-empty — skip
     const dir = trellisFleetDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const dest = join(dir, `${fleetId}.json`);
     const tmp = join(dir, `.${fleetId}.${process.pid}.tmp`);
-    const record = fleetRecordFor(state, fleetId);
+    const record = fleetRecordFor(state, fleetId, parentSessionId);
     writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, {
       encoding: "utf8",
       mode: 0o600,
@@ -1042,11 +1056,15 @@ function refreshFleetOwnerMarker(fleetId: string): void {
 /**
  * Reconcile orphaned trellis "running" records at extension startup. A record
  * is only touched when it is at least RECONCILE_MIN_AGE_MS old, and only when
- * the owner can be proven dead: the session transcript is missing (a live run
- * always has one), the owner marker's pid is no longer alive, or the pid is
- * alive but its process-birth identity differs from the marker's (the pid was
- * reused by an unrelated process — NEW-003). Anything uncertain is left as
- * `running` — never cancel another process's live run.
+ * the owner can be proven dead: a record whose session transcript is missing
+ * (a live run always has one), the owner marker's pid is no longer alive, or
+ * the pid is alive but its process-birth identity differs from the marker's
+ * (the pid was reused by an unrelated process — NEW-003). Anything uncertain
+ * is left as `running` — never cancel another process's live run. v2 starting
+ * records (sessionFile: null, transcript not yet created) follow the same
+ * owner-marker logic: a dead owner becomes a terminal cancelled record with
+ * sessionFile: null + diagnostic; a v2 record without a parentSessionId is
+ * unattributable and is dropped (no valid v2 terminal record can be written).
  */
 export function reconcileFleetRuns(): void {
   const dir = trellisFleetDir();
@@ -1092,10 +1110,16 @@ export function reconcileFleetRuns(): void {
       }
       continue;
     }
-    if (!sessionFile) {
-      // No transcript at all and none discoverable — drop the unopenable record.
+    const parentSessionId =
+      typeof record.parentSessionId === "string" && record.parentSessionId
+        ? record.parentSessionId
+        : "";
+    if (!parentSessionId) {
+      // v2 requires a non-empty parentSessionId; without it the record cannot
+      // be attributed and no valid v2 terminal record can be written — drop it.
       try {
         unlinkSync(dest);
+        if (id) removeFleetOwnerMarker(id);
       } catch {
         /* best-effort */
       }
@@ -1129,8 +1153,9 @@ export function reconcileFleetRuns(): void {
       finishedAt: now,
       prompt:
         typeof record.prompt === "string" ? record.prompt.slice(0, 200) : "",
-      sessionFile,
+      sessionFile: sessionFile || null,
       error: `interrupted (stale trellis run reconciled at startup; ${reason})`,
+      parentSessionId,
     };
     try {
       const tmp = join(dir, `.${file}.${process.pid}.tmp`);
@@ -2314,6 +2339,7 @@ export function runPi(
   emit: () => void,
   key?: string | null,
   signal?: AbortSignal,
+  parentSessionId?: string,
 ): Promise<{ output: string; failed: boolean }> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
@@ -2362,7 +2388,7 @@ export function runPi(
       settled = true;
       if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener("abort", abort);
-      writeTrellisFleetRecord(state, fleetId); // terminal record (replaces start)
+      writeTrellisFleetRecord(state, fleetId, parentSessionId); // terminal record (replaces start)
       emit();
       resolve(v);
     };
@@ -2370,16 +2396,22 @@ export function runPi(
     state.status = "running";
     state.startedAt = Date.now();
     emit();
-    // Start record (running): written lazily — only once the child has flushed
-    // its real transcript (TPE-004: never fabricate a sessionFile). Retried on
-    // every processed event; if the child exits without ever writing a
-    // transcript, no record is produced.
+    // Start record (running): published at spawn (v2 — sessionFile: null until
+    // the child flushes its real transcript; TPE-004: never fabricate a path),
+    // then rewritten once with the real path when the transcript appears.
     let startRecordWritten = false;
+    let startPathRecordWritten = false;
     const writeStartRecord = () => {
-      if (startRecordWritten || settled) return;
+      if (settled) return;
+      if (!startRecordWritten) {
+        startRecordWritten = true;
+        writeTrellisFleetRecord(state, fleetId, parentSessionId);
+        return;
+      }
+      if (startPathRecordWritten) return;
       if (!resolveSessionFile(fleetId)) return;
-      startRecordWritten = true;
-      writeTrellisFleetRecord(state, fleetId);
+      startPathRecordWritten = true;
+      writeTrellisFleetRecord(state, fleetId, parentSessionId);
     };
     writeStartRecord();
     // max_turns enforcement: assistant turns are counted in applyEvent via
@@ -2504,6 +2536,7 @@ async function runSubagent(
   inheritedModel?: string,
   projectTrusted = true,
   entries: unknown[] = [],
+  parentSessionId?: string,
 ): Promise<{ output: string; details: ProgressDetails; failed: boolean }> {
   const agentName = normalizeAgent(input.agent);
   const agentRaw = readTrellisAgent(root, agentName, projectTrusted);
@@ -2572,6 +2605,7 @@ async function runSubagent(
             emit,
             key,
             signal,
+            parentSessionId,
           ),
         ),
       );
@@ -2606,6 +2640,7 @@ async function runSubagent(
           emit,
           key,
           signal,
+          parentSessionId,
         );
         prev = result.output;
         failed = failed || result.failed;
@@ -2625,6 +2660,7 @@ async function runSubagent(
       emit,
       key,
       signal,
+      parentSessionId,
     );
     return finish(result.output, result.failed);
   } catch (e) {
@@ -2923,6 +2959,12 @@ export default function trellisExtension(pi: {
       const key = getKey(cleanInput, ctx);
       const inheritedThinking = pi.getThinkingLevel?.();
       const inheritedModel = contextModelRef(ctx);
+      // Fleet v2 parent-session correlation: capture the invoking primary pi
+      // session at tool execution. Deliberately NOT contextKey() —
+      // TRELLIS_CONTEXT_ID may override it for task routing (design.md
+      // "parentSessionId provenance"); undefined here skips the fleet write.
+      const parentSessionId =
+        callStr(() => ctx?.sessionManager?.getSessionId?.()) ?? undefined;
       const result = await runSubagent(
         root,
         cleanInput,
@@ -2935,6 +2977,7 @@ export default function trellisExtension(pi: {
         // Parent branch entries at spawn — powers the OM/handoff blocks in the
         // child prompt (design D1/D4); empty when unavailable.
         readParentBranch(ctx),
+        parentSessionId,
       );
       return {
         content: [{ type: "text", text: result.output }],

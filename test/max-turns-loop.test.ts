@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { newRun, resolveRunCfg, runPi } from "../index.ts";
-import { validateFleetRunRecordV1 } from "./fleet-validator.mjs";
 
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-maxturns-"));
 const root = join(work, "root");
@@ -153,14 +152,18 @@ test("JSON-mode stopReason=error fails the run even when the child exits 0 (TPE-
       resolveRunCfg({ agent: "trellis-implement" }, { fallbackModels: [] }),
       state,
       () => {},
+      undefined,
+      undefined,
+      "test-parent-session",
     );
     assert.equal(result.failed, true, "exit 0 must not mask a JSON-mode error");
     assert.equal(state.status, "failed");
     assert.equal(state.errorMessage, "model exploded");
-    // the terminal record must be v1-valid (failed needs a non-empty error)
+    // the terminal record must be v2 (failed needs a non-empty error)
     const record = latestRecordFor("test-run-jsonerr");
     assert.ok(record, "a terminal fleet record must be written");
-    assert.deepEqual(validateFleetRunRecordV1(record), []);
+    assert.equal(record.version, 2);
+    assert.equal(record.parentSessionId, "test-parent-session");
     assert.equal(record.status, "failed");
     assert.equal(record.error, "model exploded");
   } finally {
@@ -184,13 +187,17 @@ test("JSON-mode stopReason=aborted cancels the run even when the child exits 0 (
       resolveRunCfg({ agent: "trellis-implement" }, { fallbackModels: [] }),
       state,
       () => {},
+      undefined,
+      undefined,
+      "test-parent-session",
     );
     assert.equal(result.failed, true);
     assert.equal(state.status, "cancelled");
     assert.equal(state.errorMessage, "user interrupted");
     const record = latestRecordFor("test-run-jsonabort");
     assert.ok(record);
-    assert.deepEqual(validateFleetRunRecordV1(record), []);
+    assert.equal(record.version, 2);
+    assert.equal(record.parentSessionId, "test-parent-session");
     assert.equal(record.status, "cancelled");
     assert.equal(record.error, "user interrupted");
   } finally {

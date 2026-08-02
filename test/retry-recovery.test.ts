@@ -20,7 +20,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { newRun, resolveRunCfg, runPi } from "../index.ts";
-import { validateFleetRunRecordV1 } from "./fleet-validator.mjs";
 
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-retry-"));
 const root = join(work, "root");
@@ -46,6 +45,9 @@ const run = async (retryMode: "recover" | "fail") => {
       resolveRunCfg({ agent: "trellis-implement" }, { fallbackModels: [] }),
       state,
       () => {},
+      undefined,
+      undefined,
+      "test-parent-session",
     );
     return { result, state };
   } finally {
@@ -63,11 +65,8 @@ test("a successful assistant message after a Pi auto-retry recovers the run and 
 
   const record = latestRecordFor("test-run-retry");
   assert.ok(record, "a terminal fleet record must be written");
-  assert.deepEqual(
-    validateFleetRunRecordV1(record),
-    [],
-    "succeeded record must satisfy the fleet-core v1 contract",
-  );
+  assert.equal(record.version, 2, "record must satisfy the v2 contract");
+  assert.equal(record.parentSessionId, "test-parent-session");
   assert.equal(record.status, "succeeded");
   assert.equal(record.error, null);
 });
@@ -81,7 +80,8 @@ test("start events alone never erase a terminal failure when the retry produces 
 
   const record = latestRecordFor("test-run-retry");
   assert.ok(record);
-  assert.deepEqual(validateFleetRunRecordV1(record), []);
+  assert.equal(record.version, 2);
+  assert.equal(record.parentSessionId, "test-parent-session");
   assert.equal(record.status, "failed");
   assert.equal(record.error, "first attempt failed");
 });

@@ -4,6 +4,8 @@
 //   FAKE_PI_TURNS          assistant message_end events to emit (default 3)
 //   FAKE_PI_EXIT_AFTER     "1" -> exit 0 after the turns; else stay alive until killed
 //   FAKE_PI_SESSION        "1" -> write a v3 session JSONL into --session-dir like real pi
+//   FAKE_PI_SESSION_DELAY_MS delay before writing the session JSONL (default 0)
+//                            (lets tests observe the running record before the transcript)
 //   FAKE_PI_PROMPT_FILE    write the received prompt text to this file (for assertions)
 //   FAKE_PI_STOP_REASON    optional stopReason on every assistant message_end
 //   FAKE_PI_ERROR_MESSAGE  optional errorMessage on every assistant message_end
@@ -37,6 +39,7 @@ const writeSession = process.env.FAKE_PI_SESSION === "1";
 const stopReason = process.env.FAKE_PI_STOP_REASON;
 const errorMessage = process.env.FAKE_PI_ERROR_MESSAGE;
 const turnDelay = Number(process.env.FAKE_PI_TURN_DELAY_MS ?? "10");
+const sessionDelayMs = Number(process.env.FAKE_PI_SESSION_DELAY_MS ?? "0");
 
 const out = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
@@ -60,6 +63,8 @@ const messageEnd = (i) => {
 };
 
 if (writeSession && sessionDir && sessionId) {
+  if (sessionDelayMs > 0)
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, sessionDelayMs));
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const file = join(sessionDir, `${ts}_${sessionId}.jsonl`);
   const now = new Date().toISOString();
