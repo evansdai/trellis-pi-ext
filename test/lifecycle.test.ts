@@ -201,3 +201,64 @@ test("child ids are shared across fresh module instances via Symbol.for", async 
   assert.ok(typeof primary === "object" && primary !== null);
   assert.ok(freshMod);
 });
+
+// ── Child-side dispatch-marker suppression (independent of the lifecycle bus) ──
+class MarkerSessionManager {
+  private _id: string;
+  private _entries: unknown[];
+  constructor(id: string, entries: unknown[]) {
+    this._id = id;
+    this._entries = entries;
+  }
+  getSessionId(): string {
+    return this._id;
+  }
+  getSessionFile(): string | undefined {
+    return undefined;
+  }
+  getEntries(): unknown[] {
+    return this._entries;
+  }
+}
+
+const markerEntry = (customType: string) => ({
+  type: "custom",
+  customType,
+  id: "m1",
+  parentId: null,
+  timestamp: "t",
+});
+
+test("an unannounced leaf carrying the pi-subagents:child marker is suppressed (child-side self-gating)", () => {
+  const pi = recordingPi();
+  // Deliberately NOT announced on the lifecycle bus — the marker alone must suppress.
+  const ctx = {
+    sessionManager: new MarkerSessionManager("leaf-unannounced", [
+      markerEntry("pi-subagents:child"),
+    ]),
+  };
+  const out = (
+    pi.events["before_agent_start"] as (event: unknown, ctx: unknown) => unknown
+  )({ systemPrompt: "base" }, ctx);
+  assert.equal(
+    out,
+    undefined,
+    "marker-bearing leaf is suppressed without lifecycle announcement",
+  );
+});
+
+test("an unmarked session with getEntries() present is still injected", () => {
+  const pi = recordingPi();
+  const ctx = {
+    sessionManager: new MarkerSessionManager("primary-3", [
+      markerEntry("some-other-customType"),
+    ]),
+  };
+  const out = (
+    pi.events["before_agent_start"] as (event: unknown, ctx: unknown) => unknown
+  )({ systemPrompt: "base" }, ctx);
+  assert.ok(
+    typeof out === "object" && out !== null,
+    "a session whose getEntries() has no marker stays injected",
+  );
+});

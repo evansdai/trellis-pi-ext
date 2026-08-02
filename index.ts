@@ -42,6 +42,8 @@ interface PiExtensionContext {
     getSessionFile?: () => string | undefined;
     /** Live branch entries (messages/custom/compaction) — used for OM/handoff blocks at spawn. */
     getBranch?: () => unknown[];
+    /** All session entries; read child-side to detect the pi-subagents dispatch marker. */
+    getEntries?: () => unknown[];
   };
   /** Pi surfaces this on the tool-execution context (see agent-session.js). */
   isProjectTrusted?: () => boolean;
@@ -151,6 +153,15 @@ const SESSION_OVERVIEW_TIMEOUT_MS = 1500;
 const THROTTLE_MS = 500;
 const SUBAGENT_SESSION_CREATED = "subagents:child:session-created";
 const SUBAGENT_SESSION_DISPOSED = "subagents:child:disposed";
+/**
+ * Non-LLM `custom` entry `customType` that `pi-subagents` writes into a dispatched
+ * leaf's own session at creation (see create-subagent-session.ts). `before_agent_start`
+ * reads it child-side via `sessionManager.getEntries()` so a leaf self-gates
+ * suppression without depending on the parent's lifecycle subscription or a shared
+ * `globalThis` set — the gap that let a compliant dispatched model receive the
+ * interactive Request-Triage triage and halt.
+ */
+const DISPATCH_MARKER_CUSTOM_TYPE = "pi-subagents:child";
 // Process-realm shared state. Pi's extension loader clears its factory cache
 // when the session cwd changes and re-imports the module via jiti with
 // `moduleCache: false`, so a child binding gets a fresh module instance whose
@@ -497,6 +508,26 @@ function num(v: unknown): number {
 }
 function childSessionId(data: unknown): string | null {
   return isObj(data) ? str(data.sessionId) : null;
+}
+/**
+ * Child-side dispatch-marker check. A `pi-subagents` leaf appends a non-LLM `custom`
+ * entry (`DISPATCH_MARKER_CUSTOM_TYPE`) to its own session at spawn; reading it here
+ * lets the leaf self-gate even when the parent's `communityChildSessionIds`
+ * subscription is absent or the shared set is not visible to this context. Returns
+ * true only when the marker entry is present, so interactive primary/branch/fork
+ * sessions (which never carry it) stay injected.
+ */
+function hasDispatchMarker(ctx?: PiExtensionContext): boolean {
+  const entries = ctx?.sessionManager?.getEntries?.();
+  return (
+    Array.isArray(entries) &&
+    entries.some(
+      (e) =>
+        isObj(e) &&
+        e.type === "custom" &&
+        e.customType === DISPATCH_MARKER_CUSTOM_TYPE,
+    )
+  );
 }
 function hash(s: string) {
   return createHash("sha256").update(s).digest("hex").slice(0, 24);
@@ -3001,6 +3032,7 @@ export default function trellisExtension(pi: {
     // never suppress a community child session.
     const sessionId = callStr(() => ctx?.sessionManager?.getSessionId?.());
     if (sessionId && communityChildSessionIds().has(sessionId)) return undefined;
+    if (hasDispatchMarker(ctx)) return undefined;
     const k = getKey(event, ctx);
     const key = k ?? "default";
     const cur = (event as { systemPrompt?: string }).systemPrompt ?? "";
