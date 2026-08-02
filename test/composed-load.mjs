@@ -110,9 +110,10 @@ if (fleetCommands !== 1)
   fail(`expected exactly one fleet command, got ${fleetCommands} (${commands.join(",")})`);
 ok(`exactly one fleet command (all commands: ${commands.join(", ")})`);
 
-if (shortcuts.some((k) => String(k).includes("ctrl+s")))
-  fail(`ctrl+s shortcut registered by the composed candidate: ${shortcuts.join(",")}`);
-ok(`no ctrl+s shortcut (shortcuts: ${shortcuts.join(", ") || "none"})`);
+const fleetShortcuts = shortcuts.filter((k) => String(k).includes("ctrl+s")).length;
+if (fleetShortcuts !== 1)
+  fail(`expected exactly one ctrl+s shortcut from pi-fleet, got ${fleetShortcuts}: ${shortcuts.join(",")}`);
+ok(`exactly one ctrl+s shortcut from pi-fleet (shortcuts: ${shortcuts.join(", ") || "none"})`);
 
 if (withFork && typeof events["before_agent_start"] !== "function")
   fail("before_agent_start handler missing");

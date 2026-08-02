@@ -54,7 +54,7 @@ test("registration smoke: exactly one trellis_subagent tool, no fleet command, n
   );
   assert.equal(rec.commands.length, 0, "fork registers no commands (fleet lives in fleet-core)");
   const keys = rec.shortcuts.map((s) => s.key);
-  assert.deepEqual(keys, ["alt+o", "ctrl+s"], "alt+o toggles the subagent card; ctrl+s opens the fleet roster (docs/fleet-external-pane-viewer.md)");
+  assert.deepEqual(keys, ["alt+o"], "trellis owns only the subagent-card shortcut; pi-fleet owns ctrl+s");
 });
 
 test("registration smoke: primary-prompt lifecycle wiring is present", () => {

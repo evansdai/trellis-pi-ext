@@ -115,7 +115,7 @@ test("yield guard: unrelated extension entry -> fork registers normally", () => 
     const rec = recordingPi();
     assert.equal(rec.tools.filter((t) => t.name === "trellis_subagent").length, 1);
     const keys = rec.shortcuts.map((s) => s.key);
-    assert.deepEqual(keys, ["alt+o", "ctrl+s"]);
+    assert.deepEqual(keys, ["alt+o"]);
     assert.equal(typeof rec.events["before_agent_start"], "function");
   } finally {
     process.chdir(prevCwd);
