@@ -1794,27 +1794,6 @@ export function globalAgentsDir(): string {
 }
 
 /**
- * Resolve the pi-fleet launcher to an absolute path so ctrl+s works regardless of
- * the spawned pane's PATH. Prefers the git-package install location
- * (<agentDir>/git/github.com/evansdai/pi-fleet/bin/pi-fleet), which is portable across
- * machines (macOS/Linux) as long as the .pi config is synced; falls back to a PATH
- * lookup in this process, then to the bare "pi-fleet" name.
- */
-function resolvePiFleet(): string {
-  const agentBase = str(process.env.PI_CODING_AGENT_DIR) ?? join(homedir(), ".pi", "agent");
-  const pkgBin = join(agentBase, "git", "github.com", "evansdai", "pi-fleet", "bin", "pi-fleet");
-  if (existsSync(pkgBin)) return pkgBin;
-  const pathVal = process.env.PATH ?? process.env.Path ?? "";
-  for (const entry of pathVal.split(delimiter)) {
-    const e = entry.trim();
-    if (!e) continue;
-    const c = join(e, "pi-fleet");
-    if (existsSync(c)) return c;
-  }
-  return "pi-fleet";
-}
-
-/**
  * Resolve `<agentsDir>/<name>.md` and assert the result stays directly inside
  * the agents dir. Returns null for invalid names or escaped paths — never a
  * path outside the intended directory.
@@ -2785,68 +2764,6 @@ export default function trellisExtension(pi: {
     handler: async (ctx: PiExtensionContext) => toggleDetail(ctx),
   });
 
-  // Ctrl+S opens the fleet roster. Deployment policy (docs/fleet-external-pane-viewer.md):
-  // keybindings.json frees ctrl+s from app.session.toggleSort / app.models.save; the
-  // pi-fleet package keeps keybinding policy out of the fork, so the shortcut lives here.
-  pi.registerShortcut?.("ctrl+s", {
-    description: "Open fleet roster (pi-fleet)",
-    handler: (ctx: PiExtensionContext) => {
-      if (ctx.mode !== "tui") {
-        ctx.ui?.notify?.("Fleet roster (pi-fleet) is available in interactive mode", "warning");
-        return;
-      }
-      const launcher = (process.env.PI_FLEET_LAUNCHER ?? "auto").toLowerCase();
-      const fleet = resolvePiFleet();
-      const useHerdr =
-        launcher === "herdr" || (launcher === "auto" && !!process.env.HERDR_ENV);
-      const useTmux = launcher === "tmux" || (launcher === "auto" && !!process.env.TMUX);
-      if (useHerdr) {
-        const split = spawnSync(
-          "herdr",
-          ["pane", "split", "--current", "--direction", "right", "--no-focus"],
-          { encoding: "utf8" },
-        );
-        if (split.status !== 0) {
-          ctx.ui?.notify?.(`herdr pane split failed: ${split.stderr || split.stdout}`, "error");
-          return;
-        }
-        let paneId: string | undefined;
-        try {
-          const out = JSON.parse(split.stdout);
-          paneId =
-            out?.result?.pane?.pane_id ??
-            out?.result?.pane?.id ??
-            out?.pane?.pane_id ??
-            out?.pane?.id ??
-            out?.pane_id ??
-            out?.id ??
-            (Array.isArray(out?.result) ? out.result[0]?.pane_id : undefined);
-        } catch {
-          /* fall through */
-        }
-        if (!paneId) {
-          ctx.ui?.notify?.(
-            "Could not parse new pane id from `herdr pane split` output.",
-            "error",
-          );
-          return;
-        }
-        spawn("herdr", ["pane", "run", paneId, fleet], {
-          stdio: "ignore",
-          detached: true,
-        }).unref();
-        ctx.ui?.notify?.("Opened fleet roster in a side pane.", "info");
-      } else if (useTmux) {
-        spawn("tmux", ["split-window", "-h", fleet], {
-          stdio: "ignore",
-          detached: true,
-        }).unref();
-        ctx.ui?.notify?.("Opened fleet roster in a tmux side pane.", "info");
-      } else {
-        ctx.ui?.notify?.(`Open a terminal pane and run: ${fleet}`, "info");
-      }
-    },
-  });
   // Tool registration
   pi.registerTool?.({
     name: "trellis_subagent",
