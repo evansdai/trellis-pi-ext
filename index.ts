@@ -2677,7 +2677,7 @@ export default function trellisExtension(pi: {
   const root = findRoot(process.cwd());
   if (projectLoadsGeneratedExt(root)) {
     console.warn(
-      "[trellis-pi-ext] inactive in this project: .pi/settings.json loads the generated trellis extension (./extensions/trellis/index.ts). Remove that entry to activate @evansdai/trellis-pi-ext (fleet producer, max_turns, global agents).",
+      "[trellis-pi-ext] inactive in this project: pi auto-discovers the generated Trellis extension at .pi/extensions/trellis/index.ts (a .pi/settings.json \"extensions\" entry also counts). Remove that file/entry to activate @evansdai/trellis-pi-ext (fleet producer, max_turns, global agents).",
     );
     return;
   }
