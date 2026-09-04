@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import trellisExtension from "../index.ts";
 
-// Run from an isolated cwd so findRoot() does not walk into a project with a
-// generated Trellis extension that would make the fork yield.
+// Run from an isolated cwd so findRoot() does not discover a generated
+// Trellis extension and trigger the fork's fail-closed conflict guard.
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-register-"));
 const isolatedCwd = mkdtempSync(join(tmpdir(), "trellis-ext-register-cwd-"));
 const previousCwd = process.cwd();

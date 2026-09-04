@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isUtf8 } from "node:buffer";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -371,13 +371,10 @@ function findRoot(start: string): string {
 }
 
 // True when a generated project extension would also load this fork. The
-// fork yields to that generated extension to avoid duplicate registration.
+// fork refuses to start rather than allowing two Trellis dispatch owners.
 // A settings entry may use `./extensions/trellis/index.ts`,
 // `extensions/trellis/index.ts`, or an absolute path.
 export function projectLoadsGeneratedExt(root: string): boolean {
-  // Primary signal: pi AUTO-DISCOVERS <root>/.pi/extensions/** (subdirectory
-  // with index.ts) regardless of settings.json, so the generated ext file
-  // itself being present means it will load and the fork must yield.
   if (existsSync(join(root, ".pi", "extensions", "trellis", "index.ts"))) return true;
   const settingsPath = join(root, ".pi", "settings.json");
   if (!existsSync(settingsPath)) return false;
@@ -392,10 +389,9 @@ export function projectLoadsGeneratedExt(root: string): boolean {
   if (!Array.isArray(settings.extensions)) return false;
   return settings.extensions.some((entry) => {
     if (typeof entry !== "string") return false;
-    const resolved = resolve(root, ".pi", entry.replace(/^\.\//, ""))
-      .split(sep)
-      .join("/");
-    return resolved.endsWith("extensions/trellis/index.ts");
+    const resolved = resolve(root, ".pi", entry.replace(/^\.\//, ""));
+    const projectRelative = relative(root, resolved).replace(/\\/g, "/");
+    return projectRelative === ".pi/extensions/trellis/index.ts";
   });
 }
 
@@ -533,6 +529,9 @@ function buildContext(root: string, key: string | null, sharedBudget?: ContextBu
   const relTaskDir = relative(root, dir).replace(/\\/g, "/");
   const limits = readContextInjectionLimits(root);
   const budget = sharedBudget ?? new ContextBudget(limits.max_total_bytes);
+  const prd = materializeArtifact(root, `${relTaskDir}/prd.md`, `${relTaskDir}/prd.md (Requirements)`, "Requirements document", limits, budget);
+  const design = materializeArtifact(root, `${relTaskDir}/design.md`, `${relTaskDir}/design.md (Technical Design)`, "Technical design document", limits, budget);
+  const impl = materializeArtifact(root, `${relTaskDir}/implement.md`, `${relTaskDir}/implement.md (Execution Plan)`, "Execution plan document", limits, budget);
   const specBlocks: string[] = [];
   const seen = new Set<string>();
   for (const jsonlName of CONTEXT_JSONL_FILES) {
@@ -544,9 +543,6 @@ function buildContext(root: string, key: string | null, sharedBudget?: ContextBu
     }
   }
   const spec = specBlocks.join("\n\n");
-  const prd = materializeArtifact(root, `${relTaskDir}/prd.md`, `${relTaskDir}/prd.md (Requirements)`, "Requirements document", limits, budget);
-  const design = materializeArtifact(root, `${relTaskDir}/design.md`, `${relTaskDir}/design.md (Technical Design)`, "Technical design document", limits, budget);
-  const impl = materializeArtifact(root, `${relTaskDir}/implement.md`, `${relTaskDir}/implement.md (Execution Plan)`, "Execution plan document", limits, budget);
   return [
     "## Trellis Task Context",
     `Task directory: ${dir}`,
@@ -571,10 +567,9 @@ export default function trellisExtension(pi: {
 }): void {
   const root = findRoot(process.cwd());
   if (projectLoadsGeneratedExt(root)) {
-    console.warn(
-      "[trellis-pi-ext] inactive in this project: a generated Trellis extension is already loaded. Move it out of .pi/extensions/trellis/ to activate the pinned fork.",
+    throw new Error(
+      "[trellis-pi-ext] generated Trellis extension conflict: move .pi/extensions/trellis/index.ts out of the auto-discovered path and remove any matching settings entry before restarting.",
     );
-    return;
   }
   if (pi.events) {
     const childIds = communityChildSessionIds();

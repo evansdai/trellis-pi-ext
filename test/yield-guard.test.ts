@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import trellisExtension, { projectLoadsGeneratedExt } from "../index.ts";
 
-const work = mkdtempSync(join(tmpdir(), "trellis-ext-yield-"));
+const work = mkdtempSync(join(tmpdir(), "trellis-ext-conflict-"));
 after(() => rmSync(work, { recursive: true, force: true }));
 
 type RecordingPi = {
@@ -73,36 +73,29 @@ test("projectLoadsGeneratedExt: detects absolute form", () => {
 });
 
 // ── Registration behavior through the default export ────────────────────
-test("yield guard: project loading the generated ext registers NOTHING", () => {
+test("generated Trellis extension conflict fails closed", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["./extensions/trellis/index.ts"] }));
   const prevCwd = process.cwd();
   try {
     process.chdir(dir);
-    const rec = recordingPi();
-    assert.equal(rec.tools.length, 0, "no tools");
-    assert.equal(rec.shortcuts.length, 0, "no shortcuts");
-    assert.equal(rec.commands.length, 0, "no commands");
-    assert.deepEqual(Object.keys(rec.events), [], "no events/bus subscription");
+    assert.throws(() => recordingPi(), /generated Trellis extension conflict|move .* out/i);
   } finally {
     process.chdir(prevCwd);
   }
 });
 
-test("yield guard: entry without ./ is also detected (registers nothing)", () => {
+test("generated Trellis extension conflict fails closed without ./", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["extensions/trellis/index.ts"] }));
   const prevCwd = process.cwd();
   try {
     process.chdir(dir);
-    const rec = recordingPi();
-    assert.equal(rec.tools.length, 0);
-    assert.equal(rec.shortcuts.length, 0);
-    assert.deepEqual(Object.keys(rec.events), []);
+    assert.throws(() => recordingPi(), /generated Trellis extension conflict|move .* out/i);
   } finally {
     process.chdir(prevCwd);
   }
 });
 
-test("yield guard: unrelated extension entry -> context/lifecycle registers without native dispatch", () => {
+test("conflict guard: unrelated extension entry -> context/lifecycle registers without native dispatch", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["./extensions/other/index.ts"] }));
   const prevCwd = process.cwd();
   try {
@@ -117,7 +110,7 @@ test("yield guard: unrelated extension entry -> context/lifecycle registers with
   }
 });
 
-test("yield guard: no .pi/settings.json -> context/lifecycle registers without native dispatch", () => {
+test("conflict guard: no .pi/settings.json -> context/lifecycle registers without native dispatch", () => {
   const dir = makeProject(null);
   const prevCwd = process.cwd();
   try {
@@ -133,7 +126,7 @@ test("yield guard: no .pi/settings.json -> context/lifecycle registers without n
 });
 
 // ── Auto-discovery: pi loads <root>/.pi/extensions/** regardless of
-// settings.json, so the generated ext FILE itself must trigger the yield.
+// settings.json, so the generated ext FILE itself must trigger the conflict.
 test("projectLoadsGeneratedExt: generated ext FILE present (auto-discovery), clean settings -> true", () => {
   const dir = makeProject(JSON.stringify({ enableSkillCommands: true }));
   mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
@@ -148,17 +141,14 @@ test("projectLoadsGeneratedExt: generated ext FILE present, NO settings.json -> 
   assert.equal(projectLoadsGeneratedExt(dir), true);
 });
 
-test("yield guard: generated ext FILE present but clean settings -> registers NOTHING", () => {
+test("generated Trellis extension conflict fails closed for auto-discovery", () => {
   const dir = makeProject(JSON.stringify({ enableSkillCommands: true, prompts: ["./prompts"] }));
   mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
   writeFileSync(join(dir, ".pi", "extensions", "trellis", "index.ts"), "export default function(){}");
   const prevCwd = process.cwd();
   try {
     process.chdir(dir);
-    const rec = recordingPi();
-    assert.equal(rec.tools.length, 0, "no tools");
-    assert.equal(rec.shortcuts.length, 0, "no shortcuts");
-    assert.deepEqual(Object.keys(rec.events), [], "no events/bus subscription");
+    assert.throws(() => recordingPi(), /generated Trellis extension conflict|move .* out/i);
   } finally {
     process.chdir(prevCwd);
   }
