@@ -5,22 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import trellisExtension from "../index.ts";
 
-// Isolate fleet reconcile + agent discovery from the live profile.
+// Run from an isolated cwd so findRoot() does not walk into a project with a
+// generated Trellis extension that would make the fork yield.
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-register-"));
-process.env.PI_FLEET_RUNS_DIR = join(work, "fleet");
-process.env.PI_CODING_AGENT_DIR = join(work, "agent");
-delete process.env.TRELLIS_SUBAGENT_CHILD;
-// Run from an isolated cwd so findRoot() does not walk up into the live
-// pi-config repo (where the generated trellis ext would make the fork yield).
 const isolatedCwd = mkdtempSync(join(tmpdir(), "trellis-ext-register-cwd-"));
+const previousCwd = process.cwd();
 process.chdir(isolatedCwd);
 
 after(() => {
+  process.chdir(previousCwd);
   rmSync(isolatedCwd, { recursive: true, force: true });
   rmSync(work, { recursive: true, force: true });
 });
-
-after(() => rmSync(work, { recursive: true, force: true }));
 
 type RecordingPi = {
   tools: Record<string, unknown>[];
@@ -32,7 +28,7 @@ type RecordingPi = {
 function recordingPi(): RecordingPi {
   const rec: RecordingPi = { tools: [], shortcuts: [], events: {}, commands: [] };
   const pi = {
-    registerTool: (t: Record<string, unknown>) => void rec.tools.push(t),
+    registerTool: (tool: Record<string, unknown>) => void rec.tools.push(tool),
     registerShortcut: (key: string, opts: { description?: string }) =>
       void rec.shortcuts.push({ key, description: opts.description }),
     registerCommand: (name: string) => void rec.commands.push(name),
@@ -44,17 +40,11 @@ function recordingPi(): RecordingPi {
   return rec;
 }
 
-test("registration smoke: exactly one trellis_subagent tool, no fleet command, no ctrl+s", () => {
+test("registration smoke: native dispatch UI is not registered", () => {
   const rec = recordingPi();
-  const subagents = rec.tools.filter((t) => t.name === "trellis_subagent");
-  assert.equal(subagents.length, 1);
-  assert.equal(
-    rec.tools.filter((t) => t.name !== "trellis_subagent").length,
-    0,
-  );
-  assert.equal(rec.commands.length, 0, "fork registers no commands (fleet lives in fleet-core)");
-  const keys = rec.shortcuts.map((s) => s.key);
-  assert.deepEqual(keys, ["alt+o"], "trellis owns only the subagent-card shortcut; pi-fleet owns ctrl+s");
+  assert.deepEqual(rec.tools, []);
+  assert.deepEqual(rec.shortcuts, []);
+  assert.deepEqual(rec.commands, []);
 });
 
 test("registration smoke: primary-prompt lifecycle wiring is present", () => {
@@ -62,18 +52,6 @@ test("registration smoke: primary-prompt lifecycle wiring is present", () => {
   assert.equal(typeof rec.events["before_agent_start"], "function");
   assert.equal(typeof rec.events["session_start"], "function");
   assert.equal(typeof rec.events["tool_call"], "function");
-  assert.equal(typeof rec.events["tool_result"], "function");
-});
-
-test("registration smoke: tool description advertises global agent discovery", async () => {
-  const rec = recordingPi();
-  const tool = rec.tools.find((t) => t.name === "trellis_subagent");
-  assert.match(String(tool?.description), /global agents dir/);
-  // execute must reject an unknown agent with the two-tier error message
-  const execute = tool?.execute as (
-    id: string,
-    input: { agent?: string },
-  ) => Promise<{ content: { type: string; text: string }[] }>;
-  const out = await execute("id-1", { agent: "trellis-does-not-exist" });
-  assert.match(out.content[0]!.text, /global agents dir/);
+  assert.equal(typeof rec.events["context"], "function");
+  assert.equal(rec.events["tool_result"], undefined);
 });

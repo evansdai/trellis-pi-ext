@@ -1,7 +1,7 @@
 {
   "name": "@evansdai/trellis-pi-ext",
   "version": "0.1.0",
-  "description": "Repository-owned Pi extension fork of the @mindfoldhq/trellis generated Pi extension: trellis_subagent tool, Trellis SessionStart context, fleet producer, subagent frontmatter config compat.",
+  "description": "Repository-owned Pi extension fork providing Trellis task-context injection, startup/session lifecycle behavior, and pi-subagents child-session suppression.",
   "type": "module",
   "main": "./index.ts",
   "scripts": {

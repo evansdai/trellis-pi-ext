@@ -5,12 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import trellisExtension, { projectLoadsGeneratedExt } from "../index.ts";
 
-// Isolate fleet reconcile + agent discovery from the live profile.
 const work = mkdtempSync(join(tmpdir(), "trellis-ext-yield-"));
-process.env.PI_FLEET_RUNS_DIR = join(work, "fleet");
-process.env.PI_CODING_AGENT_DIR = join(work, "agent");
-delete process.env.TRELLIS_SUBAGENT_CHILD;
-
 after(() => rmSync(work, { recursive: true, force: true }));
 
 type RecordingPi = {
@@ -23,7 +18,7 @@ type RecordingPi = {
 function recordingPi(): RecordingPi {
   const rec: RecordingPi = { tools: [], shortcuts: [], events: {}, commands: [] };
   const pi = {
-    registerTool: (t: Record<string, unknown>) => void rec.tools.push(t),
+    registerTool: (tool: Record<string, unknown>) => void rec.tools.push(tool),
     registerShortcut: (key: string, opts: { description?: string }) =>
       void rec.shortcuts.push({ key, description: opts.description }),
     registerCommand: (name: string) => void rec.commands.push(name),
@@ -37,7 +32,7 @@ function recordingPi(): RecordingPi {
 
 // Create an isolated project dir with an optional .pi/settings.json and
 // return its path. Registration tests chdir into it so findRoot() resolves
-// there (cwd restored afterwards); helper tests pass the path as root.
+// there; helper tests pass the path as root.
 let projSeq = 0;
 function makeProject(settingsJson: string | null): string {
   const dir = join(work, `proj-${projSeq++}`);
@@ -107,28 +102,30 @@ test("yield guard: entry without ./ is also detected (registers nothing)", () =>
   }
 });
 
-test("yield guard: unrelated extension entry -> fork registers normally", () => {
+test("yield guard: unrelated extension entry -> context/lifecycle registers without native dispatch", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["./extensions/other/index.ts"] }));
   const prevCwd = process.cwd();
   try {
     process.chdir(dir);
     const rec = recordingPi();
-    assert.equal(rec.tools.filter((t) => t.name === "trellis_subagent").length, 1);
-    const keys = rec.shortcuts.map((s) => s.key);
-    assert.deepEqual(keys, ["alt+o"]);
+    assert.equal(rec.tools.length, 0);
+    assert.equal(rec.shortcuts.length, 0);
+    assert.equal(rec.commands.length, 0);
     assert.equal(typeof rec.events["before_agent_start"], "function");
   } finally {
     process.chdir(prevCwd);
   }
 });
 
-test("yield guard: no .pi/settings.json -> fork registers normally", () => {
+test("yield guard: no .pi/settings.json -> context/lifecycle registers without native dispatch", () => {
   const dir = makeProject(null);
   const prevCwd = process.cwd();
   try {
     process.chdir(dir);
     const rec = recordingPi();
-    assert.equal(rec.tools.filter((t) => t.name === "trellis_subagent").length, 1);
+    assert.equal(rec.tools.length, 0);
+    assert.equal(rec.shortcuts.length, 0);
+    assert.equal(rec.commands.length, 0);
     assert.equal(typeof rec.events["before_agent_start"], "function");
   } finally {
     process.chdir(prevCwd);
@@ -136,7 +133,7 @@ test("yield guard: no .pi/settings.json -> fork registers normally", () => {
 });
 
 // ── Auto-discovery: pi loads <root>/.pi/extensions/** regardless of
-//    settings.json, so the generated ext FILE itself must trigger the yield.
+// settings.json, so the generated ext FILE itself must trigger the yield.
 test("projectLoadsGeneratedExt: generated ext FILE present (auto-discovery), clean settings -> true", () => {
   const dir = makeProject(JSON.stringify({ enableSkillCommands: true }));
   mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
