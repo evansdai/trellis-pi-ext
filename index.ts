@@ -363,36 +363,45 @@ function readJsonlEntries(basePath: string, jsonlPath: string): JsonlEntry[] {
 function findRoot(start: string): string {
   let c = resolve(start);
   while (true) {
-    if (existsSync(join(c, ".trellis")) || existsSync(join(c, ".pi"))) return c;
+    if (existsSync(join(c, ".trellis")) || PROJECT_CONFIG_DIRS.some((dir) => existsSync(join(c, dir)))) return c;
     const p = dirname(c);
     if (p === c) return resolve(start);
     c = p;
   }
 }
 
+const PROJECT_CONFIG_DIRS = [".pi", ".omp"] as const;
+
 // True when a generated project extension would also load this fork. The
 // fork refuses to start rather than allowing two Trellis dispatch owners.
 // A settings entry may use `./extensions/trellis/index.ts`,
 // `extensions/trellis/index.ts`, or an absolute path.
 export function projectLoadsGeneratedExt(root: string): boolean {
-  if (existsSync(join(root, ".pi", "extensions", "trellis", "index.ts"))) return true;
-  const settingsPath = join(root, ".pi", "settings.json");
-  if (!existsSync(settingsPath)) return false;
-  let settings: { extensions?: unknown };
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
-      extensions?: unknown;
-    };
-  } catch {
-    return false;
+  for (const configDir of PROJECT_CONFIG_DIRS) {
+    if (existsSync(join(root, configDir, "extensions", "trellis", "index.ts"))) return true;
+    const settingsPath = join(root, configDir, "settings.json");
+    if (!existsSync(settingsPath)) continue;
+    let settings: { extensions?: unknown };
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+        extensions?: unknown;
+      };
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(settings.extensions)) continue;
+    if (
+      settings.extensions.some((entry) => {
+        if (typeof entry !== "string") return false;
+        const resolved = resolve(root, configDir, entry.replace(/^\.\//, ""));
+        const projectRelative = relative(root, resolved).replace(/\\/g, "/");
+        return projectRelative === `${configDir}/extensions/trellis/index.ts`;
+      })
+    ) {
+      return true;
+    }
   }
-  if (!Array.isArray(settings.extensions)) return false;
-  return settings.extensions.some((entry) => {
-    if (typeof entry !== "string") return false;
-    const resolved = resolve(root, ".pi", entry.replace(/^\.\//, ""));
-    const projectRelative = relative(root, resolved).replace(/\\/g, "/");
-    return projectRelative === ".pi/extensions/trellis/index.ts";
-  });
+  return false;
 }
 
 function contextKey(input?: unknown, ctx?: PiExtensionContext): string | null {
@@ -459,13 +468,57 @@ function adoptKey(root: string, key: string): string {
 
 const WF_RE =
   /\[workflow-state:([A-Za-z0-9_-]+)\]\s*\n([\s\S]*?)\n\s*\[\/workflow-state:\1\]/g;
+const PLATFORM_MARKER_RE = /^\[\/?([A-Za-z][^\[\]]*)\]\s*$/;
+function workflowPlatformMatches(platforms: string | string[], names: string): boolean {
+  const normalize = (value: string) => value.toLowerCase().replace(/[\-_\s]/g, "");
+  const needles = (Array.isArray(platforms) ? platforms : [platforms]).map(normalize);
+  return names.split(",").some((name) => needles.includes(normalize(name.trim())));
+}
+
+function filterWorkflowPlatform(content: string, platforms: string | string[]): string {
+  const out: string[] = [];
+  let inBlock = false;
+  let keepBlock = false;
+  for (const line of content.split(/\r?\n/)) {
+    const marker = line.match(PLATFORM_MARKER_RE);
+    if (marker) {
+      const closing = line.startsWith("[/");
+      if (closing) {
+        inBlock = false;
+        keepBlock = false;
+      } else {
+        inBlock = true;
+        keepBlock = workflowPlatformMatches(platforms, marker[1] ?? "");
+      }
+      continue;
+    }
+    if (inBlock) {
+      if (keepBlock) out.push(line);
+    } else {
+      out.push(line);
+    }
+  }
+  const collapsed: string[] = [];
+  let blankRun = 0;
+  for (const line of out) {
+    if (!line.trim()) {
+      blankRun++;
+      if (blankRun <= 2) collapsed.push(line);
+    } else {
+      blankRun = 0;
+      collapsed.push(line);
+    }
+  }
+  return collapsed.join("\n").trim();
+}
+
 function workflowBreadcrumb(root: string, key: string | null): string {
   const workflow = readText(join(root, ".trellis", "workflow.md"));
   if (!workflow) return "";
   const templates: Record<string, string> = {};
   for (const match of workflow.matchAll(WF_RE)) {
     const status = match[1] ?? "";
-    const body = (match[2] ?? "").trim();
+    const body = filterWorkflowPlatform((match[2] ?? "").trim(), ["Pi", "Oh My Pi"]);
     if (status && body) templates[status] = body;
   }
   const dir = readTaskDir(root, key);
@@ -568,7 +621,7 @@ export default function trellisExtension(pi: {
   const root = findRoot(process.cwd());
   if (projectLoadsGeneratedExt(root)) {
     throw new Error(
-      "[trellis-pi-ext] generated Trellis extension conflict: move .pi/extensions/trellis/index.ts out of the auto-discovered path and remove any matching settings entry before restarting.",
+      "[trellis-pi-ext] generated Trellis extension conflict: move the generated project extension out of the auto-discovered path and remove any matching settings entry before restarting.",
     );
   }
   if (pi.events) {

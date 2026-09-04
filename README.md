@@ -41,16 +41,20 @@ use the Pi/Oh My Pi gotgenes path. Historical Fleet records with
 ## Generated-extension conflict
 
 The fork is normally loaded from global Pi settings. Pi also auto-discovers a
-generated `.pi/extensions/trellis/index.ts` in the current project. If that
-file or an exact settings entry is present, startup **fails closed** with a
-clear conflict error; this fork never silently falls back to a partial
-registration. Move the generated file out of the auto-discovered path (use
-the repository's recoverable `trash` workflow where applicable), remove the
-stale settings entry, and restart Pi.
+generated `.pi/extensions/trellis/index.ts` (or `.omp/extensions/trellis/index.ts`
+for Oh My Pi) in the current project. If that file or an exact settings entry
+is present, startup **fails closed** with a clear conflict error; this fork never
+silently falls back to a partial registration. Move the generated file out of the
+auto-discovered path (use the repository's recoverable `trash` workflow where
+applicable), remove the stale settings entry, and restart Pi.
+
+The fork cannot change the upstream `trellis init` templates. If a fresh project
+still receives the native generated extension, recoverably move it out of the
+auto-discovered path and remove its settings entry before starting Pi; the
+conflict guard intentionally refuses mixed ownership.
 
 This repository has no generated Trellis extension file; the fork is its only
 Trellis extension provider here.
-
 ## Install
 
 ```bash

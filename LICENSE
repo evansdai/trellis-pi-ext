@@ -247,8 +247,7 @@ used under the GNU Affero General Public License v3.0 (see above).
 Modified from the Trellis 0.6.11 Pi extension template by Evans Dai on
 2026-08-01.
 
-Local modifications (subagent frontmatter config compat, max_turns turn-loop
-enforcement, fleet producer, two-tier global/project agent discovery,
-agent-name validation, project-trust gating) are licensed under the same
-AGPL-3.0 terms. Attribution and the license text must be preserved in any
-further derived works.
+Local modifications (primary-prompt and lifecycle integration for gotgenes child
+sessions, ordered Trellis task-artifact context injection, and the generated
+extension conflict guard) are licensed under the same AGPL-3.0 terms. Attribution
+and the license text must be preserved in any further derived works.

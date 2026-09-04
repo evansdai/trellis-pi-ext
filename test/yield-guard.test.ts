@@ -41,6 +41,13 @@ function makeProject(settingsJson: string | null): string {
   return dir;
 }
 
+function makeOhMyPiProject(settingsJson: string | null): string {
+  const dir = join(work, `omp-${projSeq++}`);
+  mkdirSync(join(dir, ".omp"), { recursive: true });
+  if (settingsJson !== null) writeFileSync(join(dir, ".omp", "settings.json"), settingsJson);
+  return dir;
+}
+
 // ── projectLoadsGeneratedExt unit edges ─────────────────────────────────
 test("projectLoadsGeneratedExt: no .pi/settings.json -> false (fork active)", () => {
   assert.equal(projectLoadsGeneratedExt(makeProject(null)), false);
@@ -59,7 +66,10 @@ test("projectLoadsGeneratedExt: detects ./extensions/trellis/index.ts", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["./extensions/trellis/index.ts"] }));
   assert.equal(projectLoadsGeneratedExt(dir), true);
 });
-
+test("projectLoadsGeneratedExt: detects Oh My Pi settings entry", () => {
+  const dir = makeOhMyPiProject(JSON.stringify({ extensions: ["./extensions/trellis/index.ts"] }));
+  assert.equal(projectLoadsGeneratedExt(dir), true);
+});
 test("projectLoadsGeneratedExt: detects extensions/trellis/index.ts without ./", () => {
   const dir = makeProject(JSON.stringify({ extensions: ["extensions/trellis/index.ts"] }));
   assert.equal(projectLoadsGeneratedExt(dir), true);
@@ -140,7 +150,16 @@ test("projectLoadsGeneratedExt: generated ext FILE present, NO settings.json -> 
   writeFileSync(join(dir, ".pi", "extensions", "trellis", "index.ts"), "export default function(){}");
   assert.equal(projectLoadsGeneratedExt(dir), true);
 });
-
+test("generated Trellis extension conflict fails closed for Oh My Pi", () => {
+  const dir = makeOhMyPiProject(JSON.stringify({ extensions: ["./extensions/trellis/index.ts"] }));
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    assert.throws(() => recordingPi(), /generated Trellis extension conflict|move .* out/i);
+  } finally {
+    process.chdir(prevCwd);
+  }
+});
 test("generated Trellis extension conflict fails closed for auto-discovery", () => {
   const dir = makeProject(JSON.stringify({ enableSkillCommands: true, prompts: ["./prompts"] }));
   mkdirSync(join(dir, ".pi", "extensions", "trellis"), { recursive: true });
@@ -149,6 +168,48 @@ test("generated Trellis extension conflict fails closed for auto-discovery", () 
   try {
     process.chdir(dir);
     assert.throws(() => recordingPi(), /generated Trellis extension conflict|move .* out/i);
+  } finally {
+    process.chdir(prevCwd);
+  }
+});
+
+test("workflow breadcrumb keeps Pi/OMP dispatch and excludes native dispatch", () => {
+  const dir = makeProject(null);
+  mkdirSync(join(dir, ".trellis", ".runtime", "sessions"), { recursive: true });
+  mkdirSync(join(dir, ".trellis", "tasks", "example"), { recursive: true });
+  writeFileSync(
+    join(dir, ".trellis", "tasks", "example", "task.json"),
+    JSON.stringify({ id: "example", status: "in_progress" }),
+  );
+  writeFileSync(
+    join(dir, ".trellis", "workflow.md"),
+    [
+      "[workflow-state:in_progress]",
+      "[Pi, Oh My Pi]",
+      "Use gotgenes `subagent` with `worker`, `oracle`, `researcher`, or `scout`.",
+      "[/Pi, Oh My Pi]",
+      "[Claude Code]",
+      "Use `trellis-implement` and `trellis-check`.",
+      "[/Claude Code]",
+      "[/workflow-state:in_progress]",
+    ].join("\n"),
+  );
+  const key = "pi_test";
+  writeFileSync(
+    join(dir, ".trellis", ".runtime", "sessions", `${key}.json`),
+    JSON.stringify({ current_task: "tasks/example" }),
+  );
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(dir);
+    const rec = recordingPi();
+    const result = rec.events["before_agent_start"]?.(
+      { systemPrompt: "base" },
+      { sessionManager: { getSessionId: () => key } },
+    ) as { systemPrompt?: string; message?: { content?: string } };
+    const context = [result.systemPrompt, result.message?.content].filter(Boolean).join("\n");
+    assert.match(context, /gotgenes `subagent`/);
+    assert.doesNotMatch(context, /trellis-implement|trellis-check/);
   } finally {
     process.chdir(prevCwd);
   }
